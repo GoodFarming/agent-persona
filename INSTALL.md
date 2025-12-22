@@ -90,8 +90,8 @@ After installation:
 └── share/
     └── agent-persona/
         ├── personas/
-        │   ├── blank/AGENTS.md    # minimal persona
-        │   └── example/AGENTS.md  # template
+        │   ├── blank/AGENTS.md    # minimal "no instructions" persona
+        │   └── template/AGENTS.md # starter template
         └── personas.local/        # your private personas
 ```
 

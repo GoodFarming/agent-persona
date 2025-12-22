@@ -83,7 +83,7 @@ if [[ -n "$SCRIPT_DIR" && -d "$SCRIPT_DIR/personas" ]]; then
   done
 else
   install_persona "blank" ""
-  install_persona "example" ""
+  install_persona "template" ""
 fi
 
 # Install examples
