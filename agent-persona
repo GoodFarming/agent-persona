@@ -599,9 +599,17 @@ cmd_print_overlay() {
     case "$1" in
       --no-meta) META_ENABLED="0"; shift ;;
       --meta-position=*) META_POSITION="${1#*=}"; shift ;;
-      --meta-position) shift; META_POSITION="$1"; shift ;;
+      --meta-position)
+        shift
+        [[ $# -gt 0 ]] || die "--meta-position requires a value"
+        META_POSITION="$1"; shift
+        ;;
       --meta-file=*) META_FILE_OVERRIDE="${1#*=}"; shift ;;
-      --meta-file) shift; META_FILE_OVERRIDE="$1"; shift ;;
+      --meta-file)
+        shift
+        [[ $# -gt 0 ]] || die "--meta-file requires a value"
+        META_FILE_OVERRIDE="$1"; shift
+        ;;
       -*)
         die "unknown flag: $1" ;;
       *)
@@ -676,24 +684,24 @@ cmd_print_overlay() {
   echo ""
 
   if [[ -n "$meta_path" && "$META_POSITION" == "top" ]]; then
-    echo "<!-- BEGIN REPO META: $meta_path -->"
+    echo "<!-- meta -->"
     cat "$meta_path"
     echo ""
-    echo "<!-- END REPO META -->"
+    echo "<!-- /meta -->"
     echo ""
   fi
 
-  echo "<!-- BEGIN PERSONA: $persona_src -->"
+  echo "<!-- persona -->"
   cat "$persona_src"
   echo ""
-  echo "<!-- END PERSONA -->"
+  echo "<!-- /persona -->"
 
   if [[ -n "$meta_path" && "$META_POSITION" == "bottom" ]]; then
     echo ""
-    echo "<!-- BEGIN REPO META: $meta_path -->"
+    echo "<!-- meta -->"
     cat "$meta_path"
     echo ""
-    echo "<!-- END REPO META -->"
+    echo "<!-- /meta -->"
   fi
 }
 
@@ -787,7 +795,7 @@ ENVIRONMENT:
   AGENT_PERSONA_FORCE_SWAP=1        Force swap mode
   AGENT_PERSONA_MCP=0               Disable MCP injection
   AGENT_PERSONA_PATHS=<p1:p2:...>   Extra search paths
-  AGENT_PERSONA_HOME=<path>         User persona directory
+  AGENT_PERSONA_HOME=<path>         Persona home (contains .personas/)
 
 OVERLAY BEHAVIOR:
   Linux with unprivileged user namespaces:
@@ -866,13 +874,17 @@ while [[ $# -gt 0 ]]; do
       META_FILE_OVERRIDE="${1#*=}"; shift
       ;;
     --meta-file)
-      shift; META_FILE_OVERRIDE="$1"; shift
+      shift
+      [[ $# -gt 0 ]] || die "--meta-file requires a value"
+      META_FILE_OVERRIDE="$1"; shift
       ;;
     --meta-position=*)
       META_POSITION="${1#*=}"; shift
       ;;
     --meta-position)
-      shift; META_POSITION="$1"; shift
+      shift
+      [[ $# -gt 0 ]] || die "--meta-position requires a value"
+      META_POSITION="$1"; shift
       ;;
     --force-swap|--no-unshare)
       FORCE_SWAP="1"; shift
@@ -1093,24 +1105,24 @@ if (( ${#meta_files[@]} > 0 )); then
     top|prepend|before)
       {
         for p in "${meta_files[@]}"; do
-          echo "<!-- BEGIN REPO META: $p -->"
+          echo "<!-- meta -->"
           cat "$p"
-          echo -e "\n<!-- END REPO META -->\n"
+          echo -e "\n<!-- /meta -->\n"
         done
-        echo "<!-- BEGIN PERSONA: $link_target -->"
+        echo "<!-- persona -->"
         cat "$link_target"
-        echo -e "\n<!-- END PERSONA -->"
+        echo -e "\n<!-- /persona -->"
       } > "$meta_tmp"
       ;;
     bottom|append|after)
       {
-        echo "<!-- BEGIN PERSONA: $link_target -->"
+        echo "<!-- persona -->"
         cat "$link_target"
-        echo -e "\n<!-- END PERSONA -->\n"
+        echo -e "\n<!-- /persona -->\n"
         for p in "${meta_files[@]}"; do
-          echo "<!-- BEGIN REPO META: $p -->"
+          echo "<!-- meta -->"
           cat "$p"
-          echo -e "\n<!-- END REPO META -->"
+          echo -e "\n<!-- /meta -->"
         done
       } > "$meta_tmp"
       ;;

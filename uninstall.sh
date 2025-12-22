@@ -10,7 +10,7 @@ STATE_DIR="${TMPDIR:-/tmp}/agent-persona-state"
 info() { echo "[uninstall] $*"; }
 warn() { echo "[uninstall] WARNING: $*" >&2; }
 
-echo "This will remove agent-persona and all user profiles."
+echo "This will remove agent-persona and all installed personas."
 echo ""
 echo "Files to be removed:"
 echo "  $BIN_DIR/agent-persona"
@@ -18,7 +18,7 @@ echo "  $BIN_DIR/codex-persona (symlink)"
 echo "  $BIN_DIR/claude-persona (symlink)"
 echo "  $BIN_DIR/gemini-persona (symlink)"
 echo "  $BIN_DIR/opencode-persona (symlink)"
-echo "  $SHARE_DIR/ (personas and examples)"
+echo "  $SHARE_DIR/ (personas)"
 echo ""
 read -p "Continue? [y/N] " -n 1 -r
 echo ""

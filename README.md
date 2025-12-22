@@ -53,7 +53,7 @@ agent-persona doctor
 When you run `agent-persona claude my-persona`:
 
 1. **Resolves** the persona from repo-local, global, or user directories
-2. **Merges** optional repo-wide meta instructions (`.persona/meta.AGENTS.md`)
+2. **Merges** optional repo-wide meta instructions (`.personas/meta.AGENTS.md`)
 3. **Injects** MCP server config from `persona.json` (if present)
 4. **Overlays** the composed instructions onto `CLAUDE.md` in your working directory
 5. **Launches** Claude with the overlaid file

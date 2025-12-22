@@ -4,9 +4,11 @@ set -euo pipefail
 # agent-persona installer
 # Works both locally (git clone) and via curl:
 #   curl -fsSL https://raw.githubusercontent.com/GoodFarming/agent-persona/main/install.sh | bash
+# Pin a version/tag:
+#   AGENT_PERSONA_VERSION=v1.0.0 bash install.sh
 
-REPO_URL="https://raw.githubusercontent.com/GoodFarming/agent-persona/main"
 VERSION="${AGENT_PERSONA_VERSION:-main}"
+REPO_URL="https://raw.githubusercontent.com/GoodFarming/agent-persona/${VERSION}"
 
 BIN_DIR="${HOME}/.local/bin"
 SHARE_DIR="${HOME}/.local/share/agent-persona"

@@ -48,8 +48,23 @@ pass "which"
 
 # --- Test: print-overlay command ---
 OVERLAY_OUT="$("$LAUNCHER" print-overlay codex blank 2>&1)"
-[[ "$OVERLAY_OUT" == *"BEGIN PERSONA"* ]] || fail "print-overlay output"
+[[ "$OVERLAY_OUT" == *"<!-- persona -->"* ]] || fail "print-overlay output"
 pass "print-overlay"
+
+# --- Test: flags requiring values ---
+set +e
+OUT="$("$LAUNCHER" print-overlay codex blank --meta-position 2>&1)"
+RC=$?
+set -e
+[[ $RC -ne 0 && "$OUT" == *"--meta-position requires a value"* ]] || fail "--meta-position without value should error"
+pass "--meta-position requires value"
+
+set +e
+OUT="$("$LAUNCHER" print-overlay codex blank --meta-file 2>&1)"
+RC=$?
+set -e
+[[ $RC -ne 0 && "$OUT" == *"--meta-file requires a value"* ]] || fail "--meta-file without value should error"
+pass "--meta-file requires value"
 
 # --- Test: init command ---
 INIT_DIR="$TEST_TMP/test-repo"
@@ -109,7 +124,6 @@ pass "recover (no orphans)"
 
 # --- Integration: MCP injection + swap restore ---
 cd "$INIT_DIR"
-export AGENT_PERSONA_FORCE_SWAP=1
 
 BIN_DIR="$TEST_TMP/bin"
 mkdir -p "$BIN_DIR"
@@ -149,6 +163,47 @@ if [[ -n "$mcp_path" ]]; then
 fi
 SH
 chmod +x "$BIN_DIR/claude"
+
+# --- Integration: unshare overlay (if available) ---
+cd "$INIT_DIR"
+unset AGENT_PERSONA_FORCE_SWAP
+
+if command -v unshare >/dev/null 2>&1 && unshare -Um true 2>/dev/null; then
+  # Make swap-mode impossible (forces unshare to be the successful path)
+  RO_STATE="$TEST_TMP/state_ro"
+  mkdir -p "$RO_STATE"
+  chmod 555 "$RO_STATE"
+  export AGENT_PERSONA_STATE_DIR="$RO_STATE"
+
+  mkdir -p .personas/unshare-persona
+  echo "UNSHARE PERSONA" > .personas/unshare-persona/AGENTS.md
+  echo "ORIGINAL AGENTS" > AGENTS.md
+
+  # Dummy tool reads the overlaid AGENTS.md from inside the session
+  cat > "$BIN_DIR/codex" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${CAPTURE_FILE:?}"
+printf '%s\n' "$@" > "$CAPTURE_FILE"
+cat AGENTS.md > "${CAPTURE_FILE}.agents"
+SH
+  chmod +x "$BIN_DIR/codex"
+
+  export CAPTURE_FILE="$TEST_TMP/unshare.args"
+  "$LAUNCHER" codex unshare-persona --no-meta -- --hello world >/dev/null 2>&1 || fail "unshare overlay launch"
+  [[ "$(cat AGENTS.md)" == "ORIGINAL AGENTS" ]] || fail "unshare overlay should not modify AGENTS.md on disk"
+  grep -Fq "UNSHARE PERSONA" "${CAPTURE_FILE}.agents" || fail "tool should see persona content via unshare overlay"
+
+  # Restore writable state dir for remaining tests
+  export AGENT_PERSONA_STATE_DIR="$TEST_TMP/state"
+  chmod 700 "$AGENT_PERSONA_STATE_DIR" 2>/dev/null || true
+
+  pass "unshare overlay (if available)"
+else
+  echo "[SKIP] unshare overlay (unshare disabled)"
+fi
+
+export AGENT_PERSONA_FORCE_SWAP=1
 
 mkdir -p .personas/mcp-persona
 echo "# MCP Persona" > .personas/mcp-persona/AGENTS.md
