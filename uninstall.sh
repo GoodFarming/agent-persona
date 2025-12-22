@@ -29,7 +29,7 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 # Check for orphaned backups first
-if [[ -d "$STATE_DIR" ]] && ls "$STATE_DIR"/*.backup 2>/dev/null | grep -q .; then
+if [[ -d "$STATE_DIR" ]] && compgen -G "$STATE_DIR/*.backup" >/dev/null 2>&1; then
   warn "Orphaned backups exist. Run 'agent-persona recover' first?"
   read -p "Continue anyway? [y/N] " -n 1 -r
   echo ""

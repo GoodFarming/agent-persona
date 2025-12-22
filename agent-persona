@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2015
 set -euo pipefail
 
 # agent-persona — tool-agnostic persona launcher for AI coding agents
@@ -345,7 +346,7 @@ agent-persona gemini my-persona
 - On Linux, `agent-persona` prefers a bind-mount overlay via `unshare` (no on-disk changes).
 - If `unshare` isn’t available, it falls back to swap-and-restore. If you hard-kill the tool, run `agent-persona recover`.
 README
-    info "  - README.md (how `.personas/` works)"
+    info "  - README.md (how .personas/ works)"
   else
     info "  - README.md already exists"
   fi
@@ -496,7 +497,6 @@ cmd_which() {
   cd "$root" && root="$(pwd -P)"
 
   local PREFER_REPO="${AGENT_PERSONA_PREFER_REPO:-1}"
-  local SOURCE_SCOPE="${AGENT_PERSONA_SOURCE:-}"
   local PERSONA_HOME="${AGENT_PERSONA_HOME:-$HOME/.local/share/agent-persona}"
   local EXTRA_PATHS="${AGENT_PERSONA_PATHS:-}"
 
@@ -712,7 +712,6 @@ cmd_list() {
   root="$(pwd -P)"
 
   local PREFER_REPO="${AGENT_PERSONA_PREFER_REPO:-1}"
-  local SOURCE_SCOPE="${AGENT_PERSONA_SOURCE:-}"
   local PERSONA_HOME="${AGENT_PERSONA_HOME:-$HOME/.local/share/agent-persona}"
   local EXTRA_PATHS="${AGENT_PERSONA_PATHS:-}"
 
@@ -828,15 +827,13 @@ case "$invoked" in
 esac
 
 persona=""
-subcommand=""
 pass_args=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     # Subcommands
     init)
-      subcommand="init"; shift
-      cmd_init "$@"; exit $?
+      shift; cmd_init "$@"; exit $?
       ;;
     doctor)
       cmd_doctor; exit $?
@@ -931,7 +928,6 @@ root="$(pwd -P)"
 
 # --- Resolve persona ---
 PREFER_REPO="${AGENT_PERSONA_PREFER_REPO:-1}"
-SOURCE_SCOPE="${AGENT_PERSONA_SOURCE:-}"
 PERSONA_HOME="${AGENT_PERSONA_HOME:-$HOME/.local/share/agent-persona}"
 EXTRA_PATHS="${AGENT_PERSONA_PATHS:-}"
 
