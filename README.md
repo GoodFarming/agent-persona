@@ -239,9 +239,9 @@ agent-persona claude reviewer
 ### 2. Project Archetypes
 
 Create personas for different project types:
-- `rails-api` — Ruby/Rails conventions
-- `react-app` — TypeScript/React patterns
-- `data-pipeline` — Python/Pandas workflows
+- `spec-lead` — Recursive Planning and Multi-Chapter Specs
+- `bead-lead` — Breaking Specs out into Beads and Beads Progress
+- `aga` — Agent Governence Architect - Desinging and Fine-Tuning Personas
 
 ### 3. Team Standards
 
