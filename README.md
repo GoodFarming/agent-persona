@@ -37,6 +37,10 @@ agent-persona claude blank
 # Launch Codex with a custom persona
 agent-persona codex my-researcher
 
+# Pass flags through to the underlying tool
+agent-persona codex researcher --full-auto
+agent-persona claude reviewer -- --verbose
+
 # See what personas are available
 agent-persona --list
 
@@ -167,6 +171,18 @@ claude-persona my-agent    # same as: agent-persona claude my-agent
 codex-persona my-agent
 gemini-persona my-agent
 opencode-persona my-agent
+```
+
+### Passing Arguments to the Tool
+
+Extra arguments are passed through to the underlying tool:
+
+```bash
+# These flags go to codex
+agent-persona codex researcher --full-auto --model o3
+
+# Use -- to separate agent-persona flags from tool flags
+agent-persona claude reviewer --no-meta -- --verbose --model sonnet
 ```
 
 ## Flags
