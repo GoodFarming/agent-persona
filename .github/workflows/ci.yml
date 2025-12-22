@@ -38,7 +38,7 @@ jobs:
       - name: Get version
         id: version
         run: |
-          VERSION=$(grep -oP 'VERSION="\K[^"]+' agent-persona)
+          VERSION=$(sed -n 's/^VERSION="\([^"]*\)".*/\1/p' agent-persona)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Check if tag exists
