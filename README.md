@@ -12,7 +12,6 @@ Switch between different agent "personalities" without permanently modifying you
 | You want project-specific context injected into every agent session | Use repo-wide meta that merges automatically |
 | MCP servers need different configs per project or persona | Define MCP in `persona.json`, auto-injected at launch |
 | You work across many repos with similar conventions | Share personas globally; repo-local ones take priority |
-| Worried about agents modifying files unexpectedly | Overlay uses bind-mount (no on-disk changes) when possible |
 
 ## Supported Tools
 
