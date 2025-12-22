@@ -71,29 +71,19 @@ install_persona() {
     cp "$src/AGENTS.md" "$SHARE_DIR/personas/$name/"
     [[ -f "$src/persona.json" ]] && cp "$src/persona.json" "$SHARE_DIR/personas/$name/"
   else
-    fetch "$REPO_URL/personas/$name/AGENTS.md" "$SHARE_DIR/personas/$name/AGENTS.md"
+    fetch "$REPO_URL/.personas/$name/AGENTS.md" "$SHARE_DIR/personas/$name/AGENTS.md"
   fi
   info "Installed persona: $name"
 }
 
-if [[ -n "$SCRIPT_DIR" && -d "$SCRIPT_DIR/personas" ]]; then
-  for persona in "$SCRIPT_DIR/personas"/*; do
+if [[ -n "$SCRIPT_DIR" && -d "$SCRIPT_DIR/.personas" ]]; then
+  for persona in "$SCRIPT_DIR/.personas"/*; do
     [[ -d "$persona" ]] || continue
     install_persona "$(basename "$persona")" "$persona"
   done
 else
   install_persona "blank" ""
   install_persona "template" ""
-fi
-
-# Install examples
-if [[ -n "$SCRIPT_DIR" && -d "$SCRIPT_DIR/examples" ]]; then
-  cp -r "$SCRIPT_DIR/examples" "$SHARE_DIR/"
-  info "Installed examples"
-else
-  mkdir -p "$SHARE_DIR/examples/.personas"
-  fetch "$REPO_URL/examples/.personas/meta.AGENTS.md" "$SHARE_DIR/examples/.personas/meta.AGENTS.md"
-  info "Installed examples"
 fi
 
 # Check PATH

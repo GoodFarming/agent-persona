@@ -41,8 +41,8 @@ ln -s ~/.local/bin/agent-persona ~/.local/bin/opencode-persona
 # 3. Create persona directories
 mkdir -p ~/.local/share/agent-persona/personas ~/.local/share/agent-persona/personas.local
 
-# 4. Copy example personas
-cp -r personas/* ~/.local/share/agent-persona/personas/
+# 4. Copy shipped personas
+cp -r .personas/* ~/.local/share/agent-persona/personas/
 
 # 5. Ensure ~/.local/bin is in PATH
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc

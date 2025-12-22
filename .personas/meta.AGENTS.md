@@ -1,7 +1,7 @@
 # Repo-Wide Agent Instructions
 
 These instructions are automatically merged into every persona launched in this repository.
-Place this file at `.personas/meta.AGENTS.md` in your repo root.
+Edit this file to add project-specific context for your agents.
 
 ## Project Context
 <!-- Describe your project so agents understand the codebase -->
