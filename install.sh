@@ -34,7 +34,7 @@ fetch() {
 }
 
 # Create directories
-mkdir -p "$BIN_DIR" "$SHARE_DIR/personas" "$SHARE_DIR/personas.local"
+mkdir -p "$BIN_DIR" "$SHARE_DIR/.personas"
 
 # Install launcher
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/agent-persona" ]]; then
@@ -60,18 +60,18 @@ install_persona() {
   local name="$1"
   local src="$2"  # local path or empty for remote
 
-  if [[ -d "$SHARE_DIR/personas/$name" ]]; then
+  if [[ -d "$SHARE_DIR/.personas/$name" ]]; then
     info "Persona exists, skipping: $name"
     return
   fi
 
-  mkdir -p "$SHARE_DIR/personas/$name"
+  mkdir -p "$SHARE_DIR/.personas/$name"
 
   if [[ -n "$src" && -f "$src/AGENTS.md" ]]; then
-    cp "$src/AGENTS.md" "$SHARE_DIR/personas/$name/"
-    [[ -f "$src/persona.json" ]] && cp "$src/persona.json" "$SHARE_DIR/personas/$name/"
+    cp "$src/AGENTS.md" "$SHARE_DIR/.personas/$name/"
+    [[ -f "$src/persona.json" ]] && cp "$src/persona.json" "$SHARE_DIR/.personas/$name/"
   else
-    fetch "$REPO_URL/.personas/$name/AGENTS.md" "$SHARE_DIR/personas/$name/AGENTS.md"
+    fetch "$REPO_URL/.personas/$name/AGENTS.md" "$SHARE_DIR/.personas/$name/AGENTS.md"
   fi
   info "Installed persona: $name"
 }

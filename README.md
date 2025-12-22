@@ -75,13 +75,11 @@ A persona is a directory containing `AGENTS.md` (required) and optionally `perso
 
 ### Persona Discovery (Priority Order)
 
-1. **Repo-local:** `.personas/<name>/` (preferred) or `.persona/<name>/` (legacy fallback)
+1. **Repo-local:** `.personas/<name>/` (preferred) or `.persona/<name>/` (legacy)
 2. **Extra paths:** `AGENT_PERSONA_PATHS` environment variable (colon-separated)
 3. **Home:** `~/.personas/<name>/`
-4. **Private:** `~/.local/share/agent-persona/personas.local/<name>/` (gitignored)
-5. **User:** `~/.local/share/agent-persona/personas/<name>/`
-6. **Hidden private:** `~/.local/share/agent-persona/.personas/<name>/`
-7. **System:** `/usr/local/share/agent-persona/personas/<name>/`
+4. **User:** `~/.local/share/agent-persona/.personas/<name>/`
+5. **System:** `/usr/local/share/agent-persona/.personas/<name>/`
 
 Check where a persona resolves from:
 ```bash
@@ -318,8 +316,8 @@ mkdir -p ~/.personas/my-agent
 ### Option 3: With Defaults & MCP
 
 ```bash
-mkdir -p ~/.local/share/agent-persona/personas/my-agent
-cat > ~/.local/share/agent-persona/personas/my-agent/persona.json << 'EOF'
+mkdir -p ~/.local/share/agent-persona/.personas/my-agent
+cat > ~/.local/share/agent-persona/.personas/my-agent/persona.json << 'EOF'
 {
   "defaults": {
     "claude": ["--permission-mode", "bypassPermissions"]

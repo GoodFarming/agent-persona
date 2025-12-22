@@ -386,26 +386,20 @@ cmd_doctor() {
   echo ""
   info "Checking persona directories..."
 
-  local have_profiles=0
-  if [[ -d "$PERSONA_HOME/personas" ]]; then
-    local count
-    count=$(find "$PERSONA_HOME/personas" -maxdepth 1 -type d | wc -l)
-    echo "[ok] Personas: $PERSONA_HOME/personas ($((count - 1)) personas)"
-    have_profiles=1
-  fi
-  if [[ -d "$PERSONA_HOME/personas.local" ]]; then
-    local count
-    count=$(find "$PERSONA_HOME/personas.local" -maxdepth 1 -type d | wc -l)
-    echo "[ok] Local personas: $PERSONA_HOME/personas.local ($((count - 1)) personas)"
-    have_profiles=1
-  fi
+  local have_personas=0
   if [[ -d "$HOME/.personas" ]]; then
     local count
     count=$(find "$HOME/.personas" -maxdepth 1 -type d | wc -l)
     echo "[ok] Home personas: $HOME/.personas ($((count - 1)) personas)"
-    have_profiles=1
+    have_personas=1
   fi
-  if [[ $have_profiles -eq 0 ]]; then
+  if [[ -d "$PERSONA_HOME/.personas" ]]; then
+    local count
+    count=$(find "$PERSONA_HOME/.personas" -maxdepth 1 -type d | wc -l)
+    echo "[ok] Installed personas: $PERSONA_HOME/.personas ($((count - 1)) personas)"
+    have_personas=1
+  fi
+  if [[ $have_personas -eq 0 ]]; then
     echo "[--] No persona directories found"
   fi
 
@@ -541,12 +535,8 @@ cmd_which() {
   fi
   if [[ -z "$persona_src" ]]; then
     try_resolve_persona_dir "$HOME/.personas" || \
-    try_resolve_persona_dir "$PERSONA_HOME/personas.local" || \
-    try_resolve_persona_dir "$PERSONA_HOME/personas" || \
-    try_resolve_persona_dir "$PERSONA_HOME/profiles.local" || \
-    try_resolve_persona_dir "$PERSONA_HOME/profiles" || \
-    try_resolve_persona_dir "/usr/local/share/agent-persona/personas" || \
-    try_resolve_persona_dir "/usr/local/share/agent-persona/profiles" || true
+    try_resolve_persona_dir "$PERSONA_HOME/.personas" || \
+    try_resolve_persona_dir "/usr/local/share/agent-persona/.personas" || true
   fi
 
   if [[ -z "$persona_src" ]]; then
@@ -643,7 +633,7 @@ cmd_print_overlay() {
   local persona_src=""
 
   # Simple resolution for dry-run
-  for base in "$root/.personas" "$root/.persona" "$HOME/.personas" "$PERSONA_HOME/personas.local" "$PERSONA_HOME/personas" "$PERSONA_HOME/profiles.local" "$PERSONA_HOME/profiles"; do
+  for base in "$root/.personas" "$root/.persona" "$HOME/.personas" "$PERSONA_HOME/.personas" "/usr/local/share/agent-persona/.personas"; do
     if [[ -f "$base/$persona/AGENTS.md" ]]; then
       persona_src="$base/$persona/AGENTS.md"
       break
@@ -752,13 +742,9 @@ cmd_list() {
     for p in "${arr[@]:-}"; do [[ -n "$p" ]] && _list_from_base "$p" paths; done
   fi
 
-  _list_from_base "$PERSONA_HOME/personas.local" local
   _list_from_base "$HOME/.personas" home
-  _list_from_base "$PERSONA_HOME/personas" user
-  _list_from_base "$PERSONA_HOME/profiles.local" local-legacy
-  _list_from_base "$PERSONA_HOME/profiles" user-legacy
-  _list_from_base "/usr/local/share/agent-persona/personas" system
-  _list_from_base "/usr/local/share/agent-persona/profiles" system-legacy
+  _list_from_base "$PERSONA_HOME/.personas" user
+  _list_from_base "/usr/local/share/agent-persona/.personas" system
 
   if [[ $found -eq 0 ]]; then
     echo "(no personas found)" >&2
@@ -975,12 +961,8 @@ fi
 
 if [[ -z "$persona_src" ]]; then
   try_resolve_persona_dir "$HOME/.personas" || \
-  try_resolve_persona_dir "$PERSONA_HOME/personas.local" || \
-  try_resolve_persona_dir "$PERSONA_HOME/personas" || \
-  try_resolve_persona_dir "$PERSONA_HOME/profiles.local" || \
-  try_resolve_persona_dir "$PERSONA_HOME/profiles" || \
-  try_resolve_persona_dir "/usr/local/share/agent-persona/personas" || \
-  try_resolve_persona_dir "/usr/local/share/agent-persona/profiles" || true
+  try_resolve_persona_dir "$PERSONA_HOME/.personas" || \
+  try_resolve_persona_dir "/usr/local/share/agent-persona/.personas" || true
 fi
 
 if [[ -z "$persona_src" && "$PREFER_REPO" != "1" ]]; then

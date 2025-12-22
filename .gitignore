@@ -16,7 +16,3 @@ Thumbs.db
 
 # Test artifacts
 tests/tmp/
-
-# Local-only personas (keep private, never commit)
-personas.local/
-profiles.local/

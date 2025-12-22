@@ -23,7 +23,7 @@ cd agent-persona
 This will:
 1. Copy `agent-persona` to `~/.local/bin/`
 2. Create symlinks: `codex-persona`, `claude-persona`, `gemini-persona`, `opencode-persona`
-3. Copy example personas to `~/.local/share/agent-persona/personas/` (and create `personas.local/` for private personas)
+3. Copy shipped personas to `~/.local/share/agent-persona/.personas/`
 
 ## Manual Install
 
@@ -38,11 +38,11 @@ ln -s ~/.local/bin/agent-persona ~/.local/bin/claude-persona
 ln -s ~/.local/bin/agent-persona ~/.local/bin/gemini-persona
 ln -s ~/.local/bin/agent-persona ~/.local/bin/opencode-persona
 
-# 3. Create persona directories
-mkdir -p ~/.local/share/agent-persona/personas ~/.local/share/agent-persona/personas.local
+# 3. Create persona directory
+mkdir -p ~/.local/share/agent-persona/.personas
 
 # 4. Copy shipped personas
-cp -r .personas/* ~/.local/share/agent-persona/personas/
+cp -r .personas/* ~/.local/share/agent-persona/.personas/
 
 # 5. Ensure ~/.local/bin is in PATH
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
@@ -89,10 +89,9 @@ After installation:
 │   └── opencode-persona       # symlink
 └── share/
     └── agent-persona/
-        ├── personas/
-        │   ├── blank/AGENTS.md    # minimal "no instructions" persona
-        │   └── template/AGENTS.md # starter template
-        └── personas.local/        # your private personas
+        └── .personas/
+            ├── blank/AGENTS.md    # minimal "no instructions" persona
+            └── template/AGENTS.md # starter template
 ```
 
 ## Adding Your Own Personas
@@ -109,8 +108,8 @@ $EDITOR ~/.personas/my-persona/AGENTS.md
 Or store them under the installed directory:
 
 ```bash
-mkdir -p ~/.local/share/agent-persona/personas/my-persona
-cat > ~/.local/share/agent-persona/personas/my-persona/AGENTS.md <<'EOF'
+mkdir -p ~/.local/share/agent-persona/.personas/my-persona
+cat > ~/.local/share/agent-persona/.personas/my-persona/AGENTS.md <<'EOF'
 # My Persona
 
 ## Purpose
@@ -171,7 +170,7 @@ Run `agent-persona recover` to restore from backup.
 ### Persona not found
 
 1. Check spelling: `agent-persona which my-persona`
-2. Verify the persona exists: `ls ~/.local/share/agent-persona/personas/`
+2. Verify the persona exists: `ls ~/.local/share/agent-persona/.personas/`
 3. Check search paths: `agent-persona --list`
 
 ### Tool not found
