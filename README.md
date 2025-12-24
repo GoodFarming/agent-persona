@@ -9,7 +9,7 @@ Switch between different agent "personalities" without permanently modifying you
 | Problem | Solution |
 |---------|----------|
 | AI agents read `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` at startup, but you want different behaviors for different tasks | Create multiple personas and switch instantly |
-| You want project-specific context injected into every agent session | Use repo-wide meta that merges automatically using meta.AGENTS.md |
+| You want project-specific context injected into every agent session | Use repo-wide meta that merges automatically using `meta.AGENTS.md` |
 | MCP servers need different configs per project or persona | Define MCP in `persona.json`, auto-injected at launch |
 | You work across many repos with similar conventions | Share personas globally; repo-local ones take priority |
 
