@@ -54,9 +54,9 @@ When you run `agent-persona claude my-persona`:
 1. **Resolves** the persona from repo-local, global, or user directories
 2. **Merges** optional repo-wide meta instructions (`.personas/meta.AGENTS.md`)
 3. **Injects** MCP server config from `persona.json` (if present)
-4. **Overlays** the composed instructions onto `CLAUDE.md` in your working directory
-5. **Launches** Claude with the overlaid file
-6. **Restores** the original file when the session ends
+4. **Overlays** the composed instructions onto `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in your working directory
+5. **Launches** Codex, Claude, Gemini, or any other CLI Agent with the overlaid file
+6. **Restores** the original file when the session ends (though ignoring those files and using Blank Persona as Default recommended)
 
 On Linux with unprivileged user namespaces, the overlay uses a bind-mount — **no on-disk changes occur**. Otherwise, it swaps and restores the file (with backup/recovery for crashes).
 
