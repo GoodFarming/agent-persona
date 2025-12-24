@@ -363,7 +363,7 @@ rm -rf ~/.local/share/agent-persona
 
 ## Contributing
 
-Issues and PRs welcome at [github.com/GoodFarming/agent-persona](https://github.com/GoodFarming/agent-persona).
+Any Contributions must be more than 1 full days work in value to justify the PR -- otherwise suggestions are preffered to avoid review. 
 
 ## License
 
