@@ -23,11 +23,12 @@ set -euo pipefail
 #   - With unshare: bind-mount overlay (no on-disk change)
 #   - Without unshare: swap-and-restore (small risk on hard-kill; use 'recover')
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 DEBUG_FLAG="${AGENT_PERSONA_DEBUG:-}"
 log() { [[ -n "$DEBUG_FLAG" ]] && echo "[agent-persona] $*" >&2 || true; }
 die() { echo "[agent-persona] error: $*" >&2; exit 1; }
+warn() { echo "[agent-persona] warning: $*" >&2; }
 info() { echo "[agent-persona] $*" >&2; }
 
 # --- Configuration (env vars with CLI flag overrides) ---
@@ -67,6 +68,19 @@ meta_is_unedited_template() {
 # --- MCP temp config (Claude) ---
 mcp_config_file=""
 cleanup_mcp() { [[ -n "${mcp_config_file:-}" && -f "$mcp_config_file" ]] && rm -f "$mcp_config_file" 2>/dev/null || true; }
+
+# --- Policy temp config files ---
+claude_settings_file=""
+gemini_settings_file=""
+opencode_config_file=""
+cleanup_policy() {
+  [[ -n "${claude_settings_file:-}" && -f "$claude_settings_file" ]] && rm -f "$claude_settings_file" 2>/dev/null || true
+  [[ -n "${gemini_settings_file:-}" && -f "$gemini_settings_file" ]] && rm -f "$gemini_settings_file" 2>/dev/null || true
+  [[ -n "${opencode_config_file:-}" && -f "$opencode_config_file" ]] && rm -f "$opencode_config_file" 2>/dev/null || true
+}
+
+# --- Policy configuration ---
+STRICT_POLICY="${AGENT_PERSONA_STRICT_POLICY:-0}"
 
 # --- Swap-and-restore state (fallback when unshare unavailable) ---
 swap_active=0
@@ -109,6 +123,7 @@ cleanup_session() {
   swap_restore
   cleanup_meta
   cleanup_mcp
+  cleanup_policy
 }
 trap cleanup_session EXIT INT TERM
 
@@ -268,6 +283,36 @@ for name, cfg in mcp_servers.items():
 PY
 }
 
+# --- Helper: resolve instruction file (tool-specific or fallback to AGENTS.md) ---
+resolve_instruction_file() {
+  local persona_dir="$1" overlay_name="$2"
+  local tool_specific="$persona_dir/$overlay_name"
+
+  # Use tool-specific file if it exists and we're not already targeting AGENTS.md
+  if [[ -f "$tool_specific" && "$overlay_name" != "AGENTS.md" ]]; then
+    echo "$tool_specific"
+  else
+    echo "$persona_dir/AGENTS.md"
+  fi
+}
+
+# --- Helper: normalize persona directory (handles file-vs-dir profiles) ---
+get_persona_dir() {
+  local persona_src="$1" profile_type="$2"
+  if [[ "$profile_type" == "file" ]]; then
+    dirname -- "$persona_src"
+  else
+    echo "$persona_src"
+  fi
+}
+
+# --- Helper: check if policy exists in persona.json ---
+policy_exists_in_json() {
+  local json_path="$1"
+  [[ -f "$json_path" ]] || return 1
+  grep -qE '"policy"\s*:' "$json_path" 2>/dev/null
+}
+
 # --- Subcommand: init ---
 cmd_init() {
   local target="${1:-.}"
@@ -364,6 +409,24 @@ cmd_doctor() {
 
   info "Checking agent-persona installation..."
   echo ""
+
+  # Check Bash version (policy features require Bash 4+)
+  local bash_major="${BASH_VERSINFO[0]}"
+  if (( bash_major >= 4 )); then
+    echo "[ok] Bash $BASH_VERSION (policy features supported)"
+  else
+    echo "[!!] Bash $BASH_VERSION detected; policy features require Bash 4+"
+    issues=$((issues + 1))
+  fi
+
+  # Check Python (required for policy enforcement)
+  if command -v python3 >/dev/null 2>&1; then
+    echo "[ok] Python 3 available (policy enforcement supported)"
+  elif command -v python >/dev/null 2>&1; then
+    echo "[ok] Python available (policy enforcement supported)"
+  else
+    echo "[--] Python not found (policy features will be unavailable)"
+  fi
 
   # Check launcher
   if command -v agent-persona >/dev/null 2>&1; then
@@ -638,17 +701,22 @@ cmd_print_overlay() {
   cd "$root" && root="$(pwd -P)"
 
   local PERSONA_HOME="${AGENT_PERSONA_HOME:-$HOME/.local/share/agent-persona}"
-  local persona_src=""
+  local persona_dir=""
 
-  # Simple resolution for dry-run
+  # Find persona directory
   for base in "$root/.personas" "$root/.persona" "$HOME/.personas" "$PERSONA_HOME/.personas" "/usr/local/share/agent-persona/.personas"; do
-    if [[ -f "$base/$persona/AGENTS.md" ]]; then
-      persona_src="$base/$persona/AGENTS.md"
+    if [[ -d "$base/$persona" && -f "$base/$persona/AGENTS.md" ]]; then
+      persona_dir="$base/$persona"
       break
     fi
   done
 
-  [[ -n "$persona_src" ]] || die "persona '$persona' not found"
+  [[ -n "$persona_dir" ]] || die "persona '$persona' not found"
+
+  # Resolve instruction file (tool-specific or fallback to AGENTS.md)
+  local persona_src
+  persona_src="$(resolve_instruction_file "$persona_dir" "$overlay_name")"
+  [[ -f "$persona_src" ]] || die "instruction file not found: $persona_src"
 
   # Find and merge meta
   local repo_root meta_path=""
@@ -678,8 +746,13 @@ cmd_print_overlay() {
     fi
   fi
 
+  # Determine which instruction file type is being used
+  local instruction_type="default"
+  [[ "$persona_src" == *"/$overlay_name" && "$overlay_name" != "AGENTS.md" ]] && instruction_type="tool-specific"
+
   echo "# === COMPOSED OVERLAY: $overlay_name ==="
-  echo "# Persona: $persona_src"
+  echo "# Persona dir: $persona_dir"
+  echo "# Instruction: $persona_src ($instruction_type)"
   [[ -n "$meta_path" ]] && echo "# Meta: $meta_path (position: $META_POSITION)"
   echo ""
 
@@ -783,6 +856,7 @@ FLAGS:
   --meta-file=<path>        Override meta file path
   --meta-position=top|bottom  Where to merge meta (default: top)
   --force-swap              Force swap-and-restore (skip unshare)
+  --strict-policy           Fail if policy cannot be enforced
   --version                 Show version
   -h, --help                Show this help
 
@@ -793,8 +867,16 @@ ENVIRONMENT:
   AGENT_PERSONA_META_POSITION=...   top or bottom
   AGENT_PERSONA_FORCE_SWAP=1        Force swap mode
   AGENT_PERSONA_MCP=0               Disable MCP injection
+  AGENT_PERSONA_STRICT_POLICY=1     Fail if policy cannot be enforced
   AGENT_PERSONA_PATHS=<p1:p2:...>   Extra search paths
   AGENT_PERSONA_HOME=<path>         Persona home (contains .personas/)
+
+EXPORTED TO TOOL (v1.1+):
+  AGENT_PERSONA_NAME          Persona slug (e.g., "code-reviewer")
+  AGENT_PERSONA_PATH          Resolved persona directory path
+  AGENT_PERSONA_TOOL          Tool being launched (claude, codex, etc.)
+  AGENT_PERSONA_OVERLAY_FILE  Target overlay file (CLAUDE.md, AGENTS.md, etc.)
+  AGENT_PERSONA_RUN_MODE      Launch mode (unshare or swap)
 
 OVERLAY BEHAVIOR:
   Linux with unprivileged user namespaces:
@@ -885,6 +967,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --force-swap|--no-unshare)
       FORCE_SWAP="1"; shift
+      ;;
+    --strict-policy)
+      STRICT_POLICY="1"; shift
       ;;
     --tool)
       shift; [[ $# -gt 0 ]] || die "--tool requires a value"
@@ -981,22 +1066,31 @@ fi
 
 log "persona source: $persona_src"
 
-# --- Identify AGENTS.md file ---
-link_target=""
-if [[ "$profile_type" == "file" ]]; then
-  link_target="$persona_src"
-else
-  link_target="$persona_src/AGENTS.md"
-fi
-[[ -f "$link_target" ]] || die "persona AGENTS.md not found: $link_target"
+# --- Normalize persona directory (handles file-vs-dir profiles) ---
+persona_dir="$(get_persona_dir "$persona_src" "$profile_type")"
+
+# --- Determine overlay filename (moved earlier for per-tool instruction support) ---
+overlay_name="AGENTS.md"
+case "$tool" in
+  claude|claude-code) overlay_name="CLAUDE.md" ;;
+  gemini) overlay_name="GEMINI.md" ;;
+esac
+
+# --- Resolve instruction file (tool-specific or fallback to AGENTS.md) ---
+link_target="$(resolve_instruction_file "$persona_dir" "$overlay_name")"
+[[ -f "$link_target" ]] || die "persona instructions not found: $link_target"
+log "instruction file: $link_target"
+
+# --- Export persona metadata for tracing/logging/memory ---
+export AGENT_PERSONA_NAME="$persona"
+export AGENT_PERSONA_PATH="$persona_dir"
+export AGENT_PERSONA_TOOL="$tool"
+export AGENT_PERSONA_OVERLAY_FILE="$overlay_name"
+# AGENT_PERSONA_RUN_MODE is set just before each launch path
 
 # --- Load per-tool defaults from persona.json ---
 json_cfg=""
-if [[ "$profile_type" == "file" ]]; then
-  base_dir="$(dirname -- "$persona_src")"
-else
-  base_dir="$persona_src"
-fi
+base_dir="$persona_dir"
 for cand in "$base_dir/persona.json" "$base_dir/Persona.json" "$base_dir/config.json"; do
   [[ -f "$cand" ]] && { json_cfg="$cand"; break; }
 done
@@ -1009,7 +1103,19 @@ if [[ -n "$json_cfg" ]]; then
   done < <(defaults_from_json "$json_cfg" "$tool")
 fi
 
-# --- Tool-specific defaults ---
+# --- Detect policy in persona.json ---
+has_policy=0
+if [[ -n "$json_cfg" ]] && policy_exists_in_json "$json_cfg"; then
+  has_policy=1
+  log "policy detected in persona.json"
+
+  # Policy requires Python for translation
+  if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+    die "policy defined in persona.json but Python not available (required for enforcement)"
+  fi
+fi
+
+# --- Tool-specific defaults (suppressed when policy exists) ---
 tool_cmd="$tool"
 case "$tool" in
   claude|claude-code)
@@ -1018,20 +1124,28 @@ case "$tool" in
     elif command -v claude-code >/dev/null 2>&1; then
       tool_cmd="claude-code"
     fi
-    # Default permission mode
-    has_perm=0
-    for a in "${pass_args[@]}" "${defaults[@]}"; do
-      [[ "$a" == "--permission-mode"* || "$a" == "--dangerously-skip-permissions" ]] && has_perm=1
-    done
-    [[ $has_perm -eq 0 ]] && defaults+=(--permission-mode bypassPermissions)
+    # Default permission mode (skip if policy exists - policy controls permissions)
+    if [[ $has_policy -eq 0 ]]; then
+      has_perm=0
+      for a in "${pass_args[@]}" "${defaults[@]}"; do
+        [[ "$a" == "--permission-mode"* || "$a" == "--dangerously-skip-permissions" ]] && has_perm=1
+      done
+      [[ $has_perm -eq 0 ]] && defaults+=(--permission-mode bypassPermissions)
+    else
+      log "policy present, skipping default --permission-mode bypassPermissions"
+    fi
     ;;
   codex)
-    # Default to --full-auto unless already specified
-    has_auto=0
-    for a in "${pass_args[@]}" "${defaults[@]}"; do
-      [[ "$a" == "--full-auto" || "$a" == "--yolo" || "$a" == "--dangerously-bypass-approvals-and-sandbox" ]] && has_auto=1
-    done
-    [[ $has_auto -eq 0 ]] && defaults+=(--full-auto)
+    # Default to --full-auto unless already specified (skip if policy exists)
+    if [[ $has_policy -eq 0 ]]; then
+      has_auto=0
+      for a in "${pass_args[@]}" "${defaults[@]}"; do
+        [[ "$a" == "--full-auto" || "$a" == "--yolo" || "$a" == "--dangerously-bypass-approvals-and-sandbox" ]] && has_auto=1
+      done
+      [[ $has_auto -eq 0 ]] && defaults+=(--full-auto)
+    else
+      log "policy present, skipping default --full-auto"
+    fi
     ;;
 esac
 
@@ -1056,13 +1170,6 @@ if [[ "$MCP_ENABLED" != "0" && -n "$json_cfg" && ( "$tool" == "claude" || "$tool
     fi
   fi
 fi
-
-# --- Determine overlay filename ---
-overlay_name="AGENTS.md"
-case "$tool" in
-  claude|claude-code) overlay_name="CLAUDE.md" ;;
-  gemini) overlay_name="GEMINI.md" ;;
-esac
 
 # --- Merge repo meta if present ---
 meta_files=()
@@ -1145,6 +1252,7 @@ launch_ok=0
 args_quoted="$(quote_join "${tool_args[@]}")"
 
 if [[ "$FORCE_SWAP" != "1" ]] && command -v unshare >/dev/null 2>&1; then
+  export AGENT_PERSONA_RUN_MODE="unshare"
   set +e
   tmp_err="$(mktemp)"
   unshare -Um bash -lc "set -euo pipefail
@@ -1187,6 +1295,7 @@ fi
 
 # --- Strategy 2: swap-and-restore (fallback) ---
 if [[ $launch_ok -eq 0 ]]; then
+  export AGENT_PERSONA_RUN_MODE="swap"
   log "using swap-and-restore mode"
 
   swap_prev_kind="none"
