@@ -313,6 +313,107 @@ policy_exists_in_json() {
   grep -qE '"policy"\s*:' "$json_path" 2>/dev/null
 }
 
+# --- Helper: filter user args that conflict with policy ---
+# Uses index-aware iteration to handle two-token flags (--flag value)
+# Outputs null-delimited args for safe array construction
+filter_user_args() {
+  local tool="$1" has_policy="$2"
+  shift 2
+  local -a user_args=("$@")
+
+  # If no policy, pass through unchanged
+  if [[ "$has_policy" -eq 0 ]]; then
+    printf '%s\0' "${user_args[@]}"
+    return 0
+  fi
+
+  # Policy-controlled flags per tool
+  local -a claude_controlled=(
+    "--permission-mode"
+    "--dangerously-skip-permissions"
+    "--tools"
+    "--allowedTools"
+    "--disallowedTools"
+    "--settings"
+  )
+
+  local -a codex_controlled_prefixes=(
+    "sandbox_mode="
+    "sandbox_workspace_write."
+    "features.web_search_request"
+  )
+
+  local -a codex_controlled_flags=(
+    "--dangerously-bypass-approvals-and-sandbox"
+    "--yolo"
+    "--full-auto"
+  )
+
+  local -a filtered=()
+  local i=0
+  local n=${#user_args[@]}
+
+  while (( i < n )); do
+    local arg="${user_args[i]}"
+    local skip=0
+    local skip_next=0
+
+    case "$tool" in
+      claude|claude-code)
+        for flag in "${claude_controlled[@]}"; do
+          if [[ "$arg" == "$flag" ]]; then
+            skip=1
+            skip_next=1
+            log "filtering policy-controlled flag: $arg ${user_args[i+1]:-}"
+            break
+          elif [[ "$arg" == "$flag="* ]]; then
+            skip=1
+            log "filtering policy-controlled flag: $arg"
+            break
+          fi
+        done
+        ;;
+
+      codex)
+        # Check standalone flags
+        for flag in "${codex_controlled_flags[@]}"; do
+          if [[ "$arg" == "$flag" ]]; then
+            skip=1
+            log "filtering policy-controlled flag: $arg"
+            break
+          fi
+        done
+
+        # Check -c config overrides
+        if [[ $skip -eq 0 && "$arg" == "-c" ]]; then
+          local next="${user_args[i+1]:-}"
+          for prefix in "${codex_controlled_prefixes[@]}"; do
+            if [[ "$next" == "$prefix"* ]]; then
+              skip=1
+              skip_next=1
+              log "filtering policy-controlled config: -c $next"
+              break
+            fi
+          done
+        fi
+        ;;
+
+      # Gemini and OpenCode use env vars for config, no CLI flags to filter
+    esac
+
+    if (( skip == 0 )); then
+      filtered+=("$arg")
+    fi
+
+    (( i++ ))
+    if (( skip_next == 1 && i < n )); then
+      (( i++ ))
+    fi
+  done
+
+  printf '%s\0' "${filtered[@]}"
+}
+
 # --- Subcommand: init ---
 cmd_init() {
   local target="${1:-.}"
@@ -1238,8 +1339,24 @@ if (( ${#meta_files[@]} > 0 )); then
   log "meta merged ($META_POSITION): ${meta_files[*]}"
 fi
 
-# --- Build final args ---
-tool_args=("${defaults[@]}" "${pass_args[@]}")
+# --- Build final args (3-way layering for policy enforcement) ---
+# Layer 1: default_args (persona defaults from persona.json)
+# Layer 2: filtered_user_args (pass-through with policy-controlled flags removed)
+# Layer 3: policy_args (enforcement - always last, always wins)
+
+default_args=("${defaults[@]}")
+policy_args=()  # Populated by policy translation (Phase 5)
+
+# Filter user args if policy exists
+filtered_user_args=()
+if [[ $has_policy -eq 1 ]]; then
+  mapfile -d '' filtered_user_args < <(filter_user_args "$tool" "$has_policy" "${pass_args[@]}")
+else
+  filtered_user_args=("${pass_args[@]}")
+fi
+
+# Final assembly: defaults + filtered_user + policy (policy wins on conflicts)
+tool_args=("${default_args[@]}" "${filtered_user_args[@]}" "${policy_args[@]}")
 
 quote_join() {
   local out="" q
