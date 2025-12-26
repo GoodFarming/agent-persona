@@ -283,6 +283,347 @@ for name, cfg in mcp_servers.items():
 PY
 }
 
+# --- Policy translation: extract policy from persona.json ---
+extract_policy() {
+  local json_path="$1"; local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  command -v "$py" >/dev/null 2>&1 || return 0
+  "$py" - "$json_path" <<'PY' || true
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        j = json.load(f)
+except Exception:
+    sys.exit(0)
+
+policy = j.get("policy")
+if not isinstance(policy, dict):
+    sys.exit(0)
+
+# Output policy as JSON for downstream processing
+print(json.dumps(policy))
+PY
+}
+
+# --- Policy translation: get tools.allow list for a tool ---
+policy_tools_allow() {
+  local json_path="$1" tool_family="$2"; local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  command -v "$py" >/dev/null 2>&1 || return 0
+  "$py" - "$json_path" "$tool_family" <<'PY' || true
+import json, sys
+
+path, tool_family = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        j = json.load(f)
+except Exception:
+    sys.exit(0)
+
+policy = j.get("policy", {})
+tools = policy.get("tools", {})
+allow = tools.get("allow", [])
+if not isinstance(allow, list):
+    sys.exit(0)
+
+# Tool name emit mapping (canonical -> tool-specific)
+EMIT_MAPS = {
+    "claude": {
+        "bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit",
+        "glob": "Glob", "grep": "Grep", "webfetch": "WebFetch",
+        "websearch": "WebSearch", "task": "Task", "todowrite": "TodoWrite",
+        "notebookedit": "NotebookEdit", "askuserquestion": "AskUserQuestion",
+    },
+    "gemini": {
+        "bash": "shell", "read": "read_file", "write": "write_file",
+        "edit": "edit_file", "glob": "glob", "grep": "grep",
+    },
+    "opencode": {
+        "bash": "bash", "read": "read", "write": "write", "edit": "edit",
+        "glob": "glob", "grep": "grep", "webfetch": "webfetch",
+        "websearch": "websearch",
+    },
+}
+
+emit_map = EMIT_MAPS.get(tool_family, {})
+for tool in allow:
+    canonical = tool.lower()
+    emitted = emit_map.get(canonical, canonical)
+    print(emitted)
+PY
+}
+
+# --- Policy translation: get tools.deny list for a tool ---
+policy_tools_deny() {
+  local json_path="$1" tool_family="$2"; local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  command -v "$py" >/dev/null 2>&1 || return 0
+  "$py" - "$json_path" "$tool_family" <<'PY' || true
+import json, sys
+
+path, tool_family = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        j = json.load(f)
+except Exception:
+    sys.exit(0)
+
+policy = j.get("policy", {})
+tools = policy.get("tools", {})
+deny = tools.get("deny", [])
+if not isinstance(deny, list):
+    sys.exit(0)
+
+# Tool name emit mapping (same as allow)
+EMIT_MAPS = {
+    "claude": {
+        "bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit",
+        "glob": "Glob", "grep": "Grep", "webfetch": "WebFetch",
+        "websearch": "WebSearch", "task": "Task", "todowrite": "TodoWrite",
+        "notebookedit": "NotebookEdit", "askuserquestion": "AskUserQuestion",
+    },
+    "gemini": {
+        "bash": "shell", "read": "read_file", "write": "write_file",
+        "edit": "edit_file", "glob": "glob", "grep": "grep",
+    },
+    "opencode": {
+        "bash": "bash", "read": "read", "write": "write", "edit": "edit",
+        "glob": "glob", "grep": "grep", "webfetch": "webfetch",
+        "websearch": "websearch",
+    },
+}
+
+emit_map = EMIT_MAPS.get(tool_family, {})
+for tool in deny:
+    canonical = tool.lower()
+    emitted = emit_map.get(canonical, canonical)
+    print(emitted)
+PY
+}
+
+# --- Policy translation: generate Claude settings JSON for path deny ---
+generate_claude_settings() {
+  local json_path="$1"; local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  command -v "$py" >/dev/null 2>&1 || return 0
+  "$py" - "$json_path" <<'PY' || true
+import json, sys, tempfile, os
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        j = json.load(f)
+except Exception:
+    sys.exit(0)
+
+policy = j.get("policy", {})
+paths = policy.get("paths", {})
+deny_paths = paths.get("deny", [])
+
+if not isinstance(deny_paths, list) or not deny_paths:
+    sys.exit(0)
+
+# Generate deny rules for each path pattern
+deny_rules = []
+for p in deny_paths:
+    if not isinstance(p, str):
+        continue
+    # Generate rules for Read, Edit, Write operations on denied paths
+    deny_rules.append(f"Read({p})")
+    deny_rules.append(f"Edit({p})")
+    deny_rules.append(f"Write({p})")
+
+if not deny_rules:
+    sys.exit(0)
+
+settings = {"permissions": {"deny": deny_rules}}
+fd, tmp_path = tempfile.mkstemp(prefix="persona-claude-settings-", suffix=".json")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(settings, f)
+print(tmp_path)
+PY
+}
+
+# --- Policy translation: generate Gemini settings JSON ---
+generate_gemini_settings() {
+  local json_path="$1"; local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  command -v "$py" >/dev/null 2>&1 || return 0
+  "$py" - "$json_path" <<'PY' || true
+import json, sys, tempfile, os
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        j = json.load(f)
+except Exception:
+    sys.exit(0)
+
+policy = j.get("policy", {})
+if not policy:
+    sys.exit(0)
+
+settings = {"tools": {}, "mcp": {}}
+
+# Tool name mapping for Gemini
+GEMINI_MAP = {
+    "bash": "shell", "read": "read_file", "write": "write_file",
+    "edit": "edit_file", "glob": "glob", "grep": "grep",
+}
+
+# tools.allow -> tools.core
+tools = policy.get("tools", {})
+if isinstance(tools.get("allow"), list):
+    core = []
+    for t in tools["allow"]:
+        canonical = t.lower()
+        core.append(GEMINI_MAP.get(canonical, canonical))
+    if core:
+        settings["tools"]["core"] = core
+
+# tools.deny -> tools.exclude
+if isinstance(tools.get("deny"), list):
+    exclude = []
+    for t in tools["deny"]:
+        canonical = t.lower()
+        exclude.append(GEMINI_MAP.get(canonical, canonical))
+    if exclude:
+        settings["tools"]["exclude"] = exclude
+
+# mcpServers.allow/deny
+mcp = policy.get("mcpServers", {})
+if isinstance(mcp.get("allow"), list) and mcp["allow"]:
+    settings["mcp"]["allowed"] = mcp["allow"]
+if isinstance(mcp.get("deny"), list) and mcp["deny"]:
+    settings["mcp"]["excluded"] = mcp["deny"]
+
+# Only write if we have something
+if not settings["tools"] and not settings["mcp"]:
+    sys.exit(0)
+
+fd, tmp_path = tempfile.mkstemp(prefix="persona-gemini-settings-", suffix=".json")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(settings, f)
+print(tmp_path)
+PY
+}
+
+# --- Policy translation: generate OpenCode config JSON ---
+generate_opencode_config() {
+  local json_path="$1"; local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  command -v "$py" >/dev/null 2>&1 || return 0
+  "$py" - "$json_path" <<'PY' || true
+import json, sys, tempfile, os
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        j = json.load(f)
+except Exception:
+    sys.exit(0)
+
+policy = j.get("policy", {})
+if not policy:
+    sys.exit(0)
+
+config = {"tools": {}, "permission": {}}
+
+# Tool name mapping for OpenCode (mostly lowercase)
+OPENCODE_MAP = {
+    "bash": "bash", "read": "read", "write": "write", "edit": "edit",
+    "glob": "glob", "grep": "grep", "webfetch": "webfetch",
+    "websearch": "websearch", "task": "task",
+}
+
+tools = policy.get("tools", {})
+
+# tools.allow -> permission: { name: "allow" }
+if isinstance(tools.get("allow"), list):
+    for t in tools["allow"]:
+        canonical = t.lower()
+        mapped = OPENCODE_MAP.get(canonical, canonical)
+        config["permission"][mapped] = "allow"
+
+# tools.deny -> tools: { name: false }
+if isinstance(tools.get("deny"), list):
+    for t in tools["deny"]:
+        canonical = t.lower()
+        mapped = OPENCODE_MAP.get(canonical, canonical)
+        config["tools"][mapped] = False
+
+# Only write if we have something
+if not config["tools"] and not config["permission"]:
+    sys.exit(0)
+
+fd, tmp_path = tempfile.mkstemp(prefix="persona-opencode-config-", suffix=".json")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(config, f)
+print(tmp_path)
+PY
+}
+
+# --- Policy translation: generate Codex sandbox overrides ---
+codex_policy_overrides() {
+  local json_path="$1" repo_root="$2"; local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  command -v "$py" >/dev/null 2>&1 || return 0
+  "$py" - "$json_path" "$repo_root" <<'PY' || true
+import json, sys, os
+
+path, repo_root = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        j = json.load(f)
+except Exception:
+    sys.exit(0)
+
+policy = j.get("policy", {})
+if not policy:
+    sys.exit(0)
+
+overrides = []
+
+# paths.allow -> sandbox_mode + writable_roots
+paths = policy.get("paths", {})
+if isinstance(paths.get("allow"), list) and paths["allow"]:
+    overrides.append('sandbox_mode="workspace-write"')
+
+    # Normalize paths to absolute
+    abs_paths = []
+    for p in paths["allow"]:
+        if not isinstance(p, str):
+            continue
+        if p.startswith("./"):
+            abs_paths.append(os.path.normpath(os.path.join(repo_root, p[2:])))
+        elif p.startswith("~/"):
+            abs_paths.append(os.path.expanduser(p))
+        elif p.startswith("/"):
+            abs_paths.append(p)
+        else:
+            abs_paths.append(os.path.normpath(os.path.join(repo_root, p)))
+
+    if abs_paths:
+        overrides.append(f'sandbox_workspace_write.writable_roots={json.dumps(abs_paths)}')
+
+# network.deny -> network_access=false
+network = policy.get("network", {})
+if isinstance(network.get("deny"), list) and "*" in network["deny"]:
+    overrides.append('sandbox_workspace_write.network_access=false')
+
+# tools.deny (websearch) -> features.web_search_request=false
+tools = policy.get("tools", {})
+if isinstance(tools.get("deny"), list):
+    deny_lower = [t.lower() for t in tools["deny"]]
+    if "websearch" in deny_lower:
+        overrides.append('features.web_search_request=false')
+
+for ov in overrides:
+    print(ov)
+PY
+}
+
 # --- Helper: resolve instruction file (tool-specific or fallback to AGENTS.md) ---
 resolve_instruction_file() {
   local persona_dir="$1" overlay_name="$2"
@@ -1272,6 +1613,70 @@ if [[ "$MCP_ENABLED" != "0" && -n "$json_cfg" && ( "$tool" == "claude" || "$tool
   fi
 fi
 
+# --- Policy translation (populate policy_args for enforcement) ---
+policy_args=()
+if [[ $has_policy -eq 1 && -n "$json_cfg" ]]; then
+  log "translating policy for tool: $tool"
+
+  case "$tool" in
+    claude|claude-code)
+      # tools.allow -> --tools (comma-separated)
+      mapfile -t allowed_tools < <(policy_tools_allow "$json_cfg" "claude")
+      if (( ${#allowed_tools[@]} > 0 )); then
+        allowed_csv=$(IFS=','; echo "${allowed_tools[*]}")
+        policy_args+=(--tools "$allowed_csv")
+        log "policy: --tools $allowed_csv"
+      fi
+
+      # tools.deny -> --disallowedTools
+      mapfile -t denied_tools < <(policy_tools_deny "$json_cfg" "claude")
+      if (( ${#denied_tools[@]} > 0 )); then
+        policy_args+=(--disallowedTools "${denied_tools[@]}")
+        log "policy: --disallowedTools ${denied_tools[*]}"
+      fi
+
+      # paths.deny -> --settings (temp JSON file)
+      claude_settings_file="$(generate_claude_settings "$json_cfg")" || claude_settings_file=""
+      if [[ -n "$claude_settings_file" && -f "$claude_settings_file" ]]; then
+        policy_args+=(--settings "$claude_settings_file")
+        log "policy: --settings $claude_settings_file"
+      fi
+      ;;
+
+    codex)
+      # Generate sandbox overrides
+      while IFS= read -r ov; do
+        [[ -n "$ov" ]] || continue
+        policy_args+=(-c "$ov")
+        log "policy: -c $ov"
+      done < <(codex_policy_overrides "$json_cfg" "$root")
+      ;;
+
+    gemini)
+      # Generate settings file and set env var
+      gemini_settings_file="$(generate_gemini_settings "$json_cfg")" || gemini_settings_file=""
+      if [[ -n "$gemini_settings_file" && -f "$gemini_settings_file" ]]; then
+        export GEMINI_CLI_SYSTEM_SETTINGS_PATH="$gemini_settings_file"
+        log "policy: GEMINI_CLI_SYSTEM_SETTINGS_PATH=$gemini_settings_file"
+      fi
+      ;;
+
+    opencode)
+      # Generate config file and set env var
+      opencode_config_file="$(generate_opencode_config "$json_cfg")" || opencode_config_file=""
+      if [[ -n "$opencode_config_file" && -f "$opencode_config_file" ]]; then
+        export OPENCODE_CONFIG="$opencode_config_file"
+        log "policy: OPENCODE_CONFIG=$opencode_config_file"
+      fi
+      ;;
+
+    *)
+      # Unknown tool - warn if policy exists
+      warn "policy defined but tool '$tool' does not have policy translation support"
+      ;;
+  esac
+fi
+
 # --- Merge repo meta if present ---
 meta_files=()
 if [[ "$META_ENABLED" != "0" ]]; then
@@ -1342,10 +1747,10 @@ fi
 # --- Build final args (3-way layering for policy enforcement) ---
 # Layer 1: default_args (persona defaults from persona.json)
 # Layer 2: filtered_user_args (pass-through with policy-controlled flags removed)
-# Layer 3: policy_args (enforcement - always last, always wins)
+# Layer 3: policy_args (enforcement - populated by policy translation above)
 
 default_args=("${defaults[@]}")
-policy_args=()  # Populated by policy translation (Phase 5)
+# policy_args already populated by policy translation section above
 
 # Filter user args if policy exists
 filtered_user_args=()
