@@ -755,6 +755,275 @@ filter_user_args() {
   printf '%s\0' "${filtered[@]}"
 }
 
+# --- Helper: check strict policy enforcement capabilities ---
+check_strict_policy() {
+  local tool="$1" json_cfg="$2"
+  local -a failures=()
+  local -a warnings=()
+  local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+
+  # Get policy elements
+  local policy_json
+  policy_json="$("$py" - "$json_cfg" <<'PY' 2>/dev/null || echo "{}"
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        j = json.load(f)
+    print(json.dumps(j.get("policy", {})))
+except:
+    print("{}")
+PY
+)"
+
+  # Check tools.allow/deny
+  local has_tools_allow has_tools_deny
+  has_tools_allow=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if p.get('tools',{}).get('allow') else 0)" 2>/dev/null || echo 0)
+  has_tools_deny=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if p.get('tools',{}).get('deny') else 0)" 2>/dev/null || echo 0)
+
+  # Check paths.allow/deny
+  local has_paths_allow has_paths_deny
+  has_paths_allow=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if p.get('paths',{}).get('allow') else 0)" 2>/dev/null || echo 0)
+  has_paths_deny=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if p.get('paths',{}).get('deny') else 0)" 2>/dev/null || echo 0)
+
+  # Check network.deny
+  local has_network_deny
+  has_network_deny=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if '*' in p.get('network',{}).get('deny',[]) else 0)" 2>/dev/null || echo 0)
+
+  # Check bash allowed (for network deny evaluation)
+  local bash_allowed
+  bash_allowed=$("$py" -c "import json; p=json.loads('$policy_json'); a=p.get('tools',{}).get('allow',[]); print(1 if not a or 'bash' in [x.lower() for x in a] else 0)" 2>/dev/null || echo 1)
+
+  case "$tool" in
+    claude|claude-code)
+      # Claude: tools.allow/deny supported, paths.deny partial, network weak
+      if [[ "$has_paths_deny" == "1" ]]; then
+        warnings+=("paths.deny: Claude path deny rules have known edge-cases with MCP tools")
+      fi
+      if [[ "$has_network_deny" == "1" && "$bash_allowed" == "1" ]]; then
+        failures+=("network.deny: Claude cannot enforce when bash allowed (shell can curl/wget)")
+      fi
+      ;;
+
+    codex)
+      # Codex: strong sandbox, but paths.deny not supported
+      if [[ "$has_paths_deny" == "1" ]]; then
+        failures+=("paths.deny: Codex sandbox does not support deny-only paths (use paths.allow)")
+      fi
+      ;;
+
+    gemini)
+      # Gemini: tools supported, paths not supported
+      if [[ "$has_paths_allow" == "1" || "$has_paths_deny" == "1" ]]; then
+        failures+=("paths: Gemini does not support path restrictions")
+      fi
+      if [[ "$has_network_deny" == "1" && "$bash_allowed" == "1" ]]; then
+        warnings+=("network.deny: only blocks web tools, not shell network access")
+      fi
+      ;;
+
+    opencode)
+      # OpenCode: tools supported, paths partial
+      if [[ "$has_network_deny" == "1" && "$bash_allowed" == "1" ]]; then
+        warnings+=("network.deny: only blocks web tools, not shell network access")
+      fi
+      ;;
+
+    *)
+      failures+=("tool '$tool' does not have policy translation support")
+      ;;
+  esac
+
+  # Report warnings
+  for w in "${warnings[@]}"; do
+    warn "strict-policy: $w"
+  done
+
+  # Report and fail on failures
+  if (( ${#failures[@]} > 0 )); then
+    for f in "${failures[@]}"; do
+      echo "[FAIL] $f" >&2
+    done
+    die "strict-policy: ${#failures[@]} enforcement failure(s) - policy cannot be reliably enforced"
+  fi
+}
+
+# --- Subcommand: print-policy ---
+cmd_print_policy() {
+  local tool="" persona=""
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*)
+        die "unknown flag: $1" ;;
+      *)
+        if [[ -z "$tool" ]]; then
+          tool="$1"
+        elif [[ -z "$persona" ]]; then
+          persona="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  tool="${tool:-codex}"
+  [[ -n "$persona" ]] || die "usage: agent-persona print-policy <tool> <persona>"
+
+  # Determine overlay filename
+  local overlay_name="AGENTS.md"
+  case "$tool" in
+    claude|claude-code) overlay_name="CLAUDE.md" ;;
+    gemini) overlay_name="GEMINI.md" ;;
+  esac
+
+  # Resolve persona
+  local root="${AGENT_PERSONA_ROOT:-$(pwd)}"
+  cd "$root" && root="$(pwd -P)"
+
+  local PERSONA_HOME="${AGENT_PERSONA_HOME:-$HOME/.local/share/agent-persona}"
+  local persona_dir=""
+
+  for base in "$root/.personas" "$root/.persona" "$HOME/.personas" "$PERSONA_HOME/.personas" "/usr/local/share/agent-persona/.personas"; do
+    if [[ -d "$base/$persona" && -f "$base/$persona/AGENTS.md" ]]; then
+      persona_dir="$base/$persona"
+      break
+    fi
+  done
+
+  [[ -n "$persona_dir" ]] || die "persona '$persona' not found"
+
+  # Check for persona.json
+  local json_cfg=""
+  for cand in "$persona_dir/persona.json" "$persona_dir/Persona.json" "$persona_dir/config.json"; do
+    [[ -f "$cand" ]] && { json_cfg="$cand"; break; }
+  done
+
+  echo "=== Policy Summary ==="
+  echo ""
+  echo "Persona:        $persona"
+  echo "Persona dir:    $persona_dir"
+  echo "Tool:           $tool"
+  echo "Overlay file:   $overlay_name"
+  echo ""
+
+  echo "=== Environment Variables (exported to tool) ==="
+  echo "AGENT_PERSONA_NAME=$persona"
+  echo "AGENT_PERSONA_PATH=$persona_dir"
+  echo "AGENT_PERSONA_TOOL=$tool"
+  echo "AGENT_PERSONA_OVERLAY_FILE=$overlay_name"
+  echo ""
+
+  if [[ -z "$json_cfg" ]]; then
+    echo "=== Policy ==="
+    echo "(no persona.json found)"
+    return 0
+  fi
+
+  if ! policy_exists_in_json "$json_cfg"; then
+    echo "=== Policy ==="
+    echo "(no policy block in persona.json)"
+    return 0
+  fi
+
+  echo "=== Policy Source ==="
+  echo "$json_cfg"
+  echo ""
+
+  echo "=== Policy Content ==="
+  local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  "$py" - "$json_cfg" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        j = json.load(f)
+    policy = j.get("policy", {})
+    print(json.dumps(policy, indent=2))
+except Exception as e:
+    print(f"Error: {e}")
+PY
+  echo ""
+
+  echo "=== Policy Translation for $tool ==="
+  case "$tool" in
+    claude|claude-code)
+      echo "Tool flags:"
+      mapfile -t allowed < <(policy_tools_allow "$json_cfg" "claude")
+      if (( ${#allowed[@]} > 0 )); then
+        echo "  --tools $(IFS=','; echo "${allowed[*]}")"
+      fi
+      mapfile -t denied < <(policy_tools_deny "$json_cfg" "claude")
+      if (( ${#denied[@]} > 0 )); then
+        echo "  --disallowedTools ${denied[*]}"
+      fi
+      local settings
+      settings="$(generate_claude_settings "$json_cfg" 2>/dev/null)" || settings=""
+      if [[ -n "$settings" && -f "$settings" ]]; then
+        echo "  --settings <temp file with path deny rules>"
+        rm -f "$settings"
+      fi
+      ;;
+
+    codex)
+      echo "Config overrides:"
+      while IFS= read -r ov; do
+        [[ -n "$ov" ]] && echo "  -c $ov"
+      done < <(codex_policy_overrides "$json_cfg" "$root")
+      ;;
+
+    gemini)
+      echo "Settings file via GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+      local settings
+      settings="$(generate_gemini_settings "$json_cfg" 2>/dev/null)" || settings=""
+      if [[ -n "$settings" && -f "$settings" ]]; then
+        cat "$settings"
+        rm -f "$settings"
+      fi
+      ;;
+
+    opencode)
+      echo "Config file via OPENCODE_CONFIG"
+      local config
+      config="$(generate_opencode_config "$json_cfg" 2>/dev/null)" || config=""
+      if [[ -n "$config" && -f "$config" ]]; then
+        cat "$config"
+        rm -f "$config"
+      fi
+      ;;
+
+    *)
+      echo "(no policy translation for $tool)"
+      ;;
+  esac
+  echo ""
+
+  echo "=== Enforcement Notes ==="
+  case "$tool" in
+    claude|claude-code)
+      echo "- tools.allow/deny: Strong (via --tools, --disallowedTools)"
+      echo "- paths.deny: Partial (Claude has edge-cases with MCP tools)"
+      echo "- network.deny: Weak if bash allowed (shell can curl/wget)"
+      ;;
+    codex)
+      echo "- sandbox: Strong (workspace-write mode with writable_roots)"
+      echo "- network: Strong (network_access=false)"
+      echo "- paths.deny: Not supported (use paths.allow instead)"
+      ;;
+    gemini)
+      echo "- tools: Strong (via tools.core, tools.exclude)"
+      echo "- paths: Not supported"
+      echo "- network: Partial (only blocks web tools)"
+      ;;
+    opencode)
+      echo "- tools: Strong (via tools, permission config)"
+      echo "- paths: Partial"
+      echo "- network: Partial (only blocks web tools)"
+      ;;
+  esac
+}
+
 # --- Subcommand: init ---
 cmd_init() {
   local target="${1:-.}"
@@ -1286,6 +1555,7 @@ USAGE:
   agent-persona recover               Restore files after hard-kill
   agent-persona which <persona>       Show resolved paths (no launch)
   agent-persona print-overlay <t> <p> Show composed overlay (dry-run)
+  agent-persona print-policy <t> <p>  Show policy translation summary
   agent-persona --list                List available personas
 
 TOOLS:
@@ -1372,6 +1642,10 @@ while [[ $# -gt 0 ]]; do
     print-overlay|--dry-run)
       shift
       cmd_print_overlay "$@"; exit $?
+      ;;
+    print-policy)
+      shift
+      cmd_print_policy "$@"; exit $?
       ;;
 
     # Flags
@@ -1675,6 +1949,11 @@ if [[ $has_policy -eq 1 && -n "$json_cfg" ]]; then
       warn "policy defined but tool '$tool' does not have policy translation support"
       ;;
   esac
+
+  # Strict policy enforcement check
+  if [[ "$STRICT_POLICY" == "1" ]]; then
+    check_strict_policy "$tool" "$json_cfg"
+  fi
 fi
 
 # --- Merge repo meta if present ---
