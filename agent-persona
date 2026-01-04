@@ -37,21 +37,59 @@ META_FILE_OVERRIDE="${AGENT_PERSONA_META_FILE:-}"
 META_POSITION="${AGENT_PERSONA_META_POSITION:-top}"
 FORCE_SWAP="${AGENT_PERSONA_FORCE_SWAP:-0}"
 MCP_ENABLED="${AGENT_PERSONA_MCP:-1}"
+DEFAULTS_ENABLED="${AGENT_PERSONA_DEFAULTS:-1}"
+INCLUDE_DEPTH="${AGENT_PERSONA_INCLUDE_DEPTH:-10}"
+GEMINI_FORCE_TTY="${AGENT_PERSONA_GEMINI_FORCE_TTY:-auto}"
 
 meta_tmp=""
 cleanup_meta() { [[ -n "${meta_tmp:-}" ]] && rm -f "$meta_tmp" 2>/dev/null || true; }
+
+include_tmp_files=()
+cleanup_includes() {
+  local f
+  for f in "${include_tmp_files[@]:-}"; do
+    [[ -n "$f" ]] && rm -f "$f" 2>/dev/null || true
+  done
+}
 
 default_meta_template() {
   cat <<'META'
 # Repo-Wide Agent Instructions
 
-These instructions apply to ALL personas launched in this repository.
+These instructions are automatically merged into every persona launched in this repository.
+Edit this file to add project-specific context for your agents.
 
 ## Project Context
-<!-- Add project-specific context here -->
+<!-- Describe your project so agents understand the codebase -->
+This is [PROJECT NAME], a [brief description].
+
+**Tech stack:**
+- Language: [e.g., TypeScript, Python, Go]
+- Framework: [e.g., React, FastAPI, Echo]
+- Database: [e.g., PostgreSQL, SQLite, none]
+
+**Key directories:**
+- `src/` - Main source code
+- `tests/` - Test files
+- `docs/` - Documentation
 
 ## Conventions
-<!-- Add coding conventions, style guides, etc. -->
+<!-- Coding standards and patterns used in this project -->
+- Use [style guide or formatter, e.g., Prettier, Black]
+- Follow [naming convention, e.g., camelCase for functions]
+- Write tests for new functionality
+- Keep commits atomic and well-described
+
+## Do Not
+<!-- Things agents should avoid in this repo -->
+- Modify files in `vendor/` or `node_modules/`
+- Change configuration without discussing first
+- Skip tests when making changes
+
+## Notes
+<!-- Any other context that helps agents work effectively -->
+- The main branch is `main`, PRs required for all changes
+- CI runs on every push; check status before marking done
 META
 }
 
@@ -73,11 +111,13 @@ cleanup_mcp() { [[ -n "${mcp_config_file:-}" && -f "$mcp_config_file" ]] && rm -
 claude_settings_file=""
 gemini_settings_file=""
 opencode_config_file=""
+gemini_wrapper_file=""
 cleanup_policy() {
   [[ -n "${claude_settings_file:-}" && -f "$claude_settings_file" ]] && rm -f "$claude_settings_file" 2>/dev/null || true
   [[ -n "${gemini_settings_file:-}" && -f "$gemini_settings_file" ]] && rm -f "$gemini_settings_file" 2>/dev/null || true
   [[ -n "${opencode_config_file:-}" && -f "$opencode_config_file" ]] && rm -f "$opencode_config_file" 2>/dev/null || true
 }
+cleanup_gemini() { [[ -n "${gemini_wrapper_file:-}" && -f "$gemini_wrapper_file" ]] && rm -f "$gemini_wrapper_file" 2>/dev/null || true; }
 
 # --- Policy configuration ---
 STRICT_POLICY="${AGENT_PERSONA_STRICT_POLICY:-0}"
@@ -122,8 +162,10 @@ cleanup_session() {
   set +e
   swap_restore
   cleanup_meta
+  cleanup_includes
   cleanup_mcp
   cleanup_policy
+  cleanup_gemini
 }
 trap cleanup_session EXIT INT TERM
 
@@ -180,6 +222,292 @@ if isinstance(j.get("defaults"), dict):
 for a in defaults:
     print(a)
 PY
+}
+
+resolve_persona_json() {
+  local json_path="$1" persona_dir="$2" include_root="$3" prefer_repo="$4" extra_paths="$5" persona_home="$6"
+  [[ -f "$json_path" ]] || return 0
+
+  if ! grep -q '"include"[[:space:]]*:' "$json_path" 2>/dev/null; then
+    echo "$json_path"
+    return 0
+  fi
+
+  local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  command -v "$py" >/dev/null 2>&1 || die "persona.json includes require python (python3 or python)"
+
+  local tmp
+  tmp="$(mktemp -p "${TMPDIR:-/tmp}" "agent-persona.persona-json.XXXXXX")"
+  set +e
+  AP_ROOT="$include_root" AP_PREFER_REPO="$prefer_repo" AP_EXTRA_PATHS="$extra_paths" \
+    AP_PERSONA_HOME="$persona_home" AP_HOME="$HOME" AP_INCLUDE_DEPTH="$INCLUDE_DEPTH" \
+    "$py" - "$json_path" "$persona_dir" <<'PY' > "$tmp"
+import json
+import os
+import sys
+
+json_path = sys.argv[1]
+persona_dir = sys.argv[2]
+
+def err(msg):
+    print(f"include error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+def load_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        err(f"failed to parse {path}: {e}")
+    if not isinstance(data, dict):
+        err(f"expected object in {path}")
+    return data
+
+def find_persona_json(dir_path):
+    for name in ("persona.json", "Persona.json", "config.json"):
+        cand = os.path.join(dir_path, name)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+root = os.path.abspath(os.environ.get("AP_ROOT") or os.getcwd())
+prefer_repo = os.environ.get("AP_PREFER_REPO", "1") == "1"
+extra_paths = [p for p in os.environ.get("AP_EXTRA_PATHS", "").split(":") if p]
+home = os.environ.get("AP_HOME") or ""
+persona_home = os.environ.get("AP_PERSONA_HOME") or os.path.join(home, ".local/share/agent-persona")
+max_depth = int(os.environ.get("AP_INCLUDE_DEPTH", "10"))
+
+def has_persona(base, name):
+    if not base:
+        return None
+    cand = os.path.join(base, name, "AGENTS.md")
+    if os.path.isfile(cand):
+        return os.path.dirname(cand)
+    return None
+
+def scan_repo_upwards(start, name):
+    d = os.path.abspath(start)
+    while True:
+        for base in (".personas", ".persona"):
+            found = has_persona(os.path.join(d, base), name)
+            if found:
+                return found
+        if d == "/":
+            break
+        d = os.path.dirname(d)
+    return None
+
+def resolve_persona_dir(name):
+    if prefer_repo:
+        found = scan_repo_upwards(root, name)
+        if found:
+            return found
+    for p in extra_paths:
+        found = has_persona(p, name)
+        if found:
+            return found
+    for base in (os.path.join(home, ".personas"), os.path.join(persona_home, ".personas"), "/usr/local/share/agent-persona/.personas"):
+        found = has_persona(base, name)
+        if found:
+            return found
+    if not prefer_repo:
+        found = scan_repo_upwards(root, name)
+        if found:
+            return found
+    return None
+
+def resolve_shared_file(rel_path, shared_root):
+    if not shared_root:
+        err(f"shared root not set for file include: {rel_path}")
+    if not isinstance(rel_path, str) or not rel_path:
+        err("include file path must be a non-empty string")
+    if os.path.isabs(rel_path) or rel_path.startswith("~"):
+        err(f"include file must be relative to shared root: {rel_path}")
+    base = os.path.abspath(shared_root)
+    target = os.path.abspath(os.path.join(base, rel_path))
+    if os.path.commonpath([base, target]) != base:
+        err(f"include file escapes shared root: {rel_path}")
+    if not os.path.isfile(target):
+        err(f"include file not found: {target}")
+    return target
+
+def merge_list(left, right, normalize=None):
+    out = []
+    seen = set()
+    for item in (left or []) + (right or []):
+        if not isinstance(item, str):
+            continue
+        key = normalize(item) if normalize else item
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out, seen
+
+def merge_defaults(a, b):
+    result = {}
+    for src in (a, b):
+        if not isinstance(src, dict):
+            continue
+        for key, val in src.items():
+            if not isinstance(val, list):
+                continue
+            dst = result.setdefault(key, [])
+            for item in val:
+                if item not in dst:
+                    dst.append(item)
+    return result
+
+def extract_mcp_servers(doc):
+    if isinstance(doc.get("mcp"), dict):
+        mcp = doc["mcp"]
+        servers = mcp.get("servers") or mcp.get("mcpServers")
+        if isinstance(servers, dict):
+            return servers
+    if isinstance(doc.get("mcpServers"), dict):
+        return doc["mcpServers"]
+    return {}
+
+def merge_mcp(a, b):
+    result = dict(a)
+    for name, cfg in b.items():
+        if not isinstance(name, str):
+            continue
+        if name in result and result[name] != cfg:
+            err(f"mcp server conflict for '{name}'")
+        result[name] = cfg
+    return result
+
+def merge_policy(a, b):
+    pa = a if isinstance(a, dict) else {}
+    pb = b if isinstance(b, dict) else {}
+
+    tools_a = pa.get("tools") if isinstance(pa.get("tools"), dict) else {}
+    tools_b = pb.get("tools") if isinstance(pb.get("tools"), dict) else {}
+    allow, allow_set = merge_list(tools_a.get("allow"), tools_b.get("allow"), normalize=str.lower)
+    deny, deny_set = merge_list(tools_a.get("deny"), tools_b.get("deny"), normalize=str.lower)
+    if allow_set & deny_set:
+        err("policy tools.allow conflicts with tools.deny")
+
+    paths_a = pa.get("paths") if isinstance(pa.get("paths"), dict) else {}
+    paths_b = pb.get("paths") if isinstance(pb.get("paths"), dict) else {}
+    p_allow, p_allow_set = merge_list(paths_a.get("allow"), paths_b.get("allow"))
+    p_deny, p_deny_set = merge_list(paths_a.get("deny"), paths_b.get("deny"))
+    if p_allow_set & p_deny_set:
+        err("policy paths.allow conflicts with paths.deny")
+
+    net_a = pa.get("network") if isinstance(pa.get("network"), dict) else {}
+    net_b = pb.get("network") if isinstance(pb.get("network"), dict) else {}
+    n_deny, _ = merge_list(net_a.get("deny"), net_b.get("deny"))
+
+    out = {}
+    tools_out = {}
+    if allow:
+        tools_out["allow"] = allow
+    if deny:
+        tools_out["deny"] = deny
+    if tools_out:
+        out["tools"] = tools_out
+
+    paths_out = {}
+    if p_allow:
+        paths_out["allow"] = p_allow
+    if p_deny:
+        paths_out["deny"] = p_deny
+    if paths_out:
+        out["paths"] = paths_out
+
+    if n_deny:
+        out["network"] = {"deny": n_deny}
+
+    return out
+
+def merge_docs(base, other):
+    result = {}
+    for key, val in (base or {}).items():
+        if key in ("include", "defaults", "policy", "mcp", "mcpServers"):
+            continue
+        result[key] = val
+
+    defaults = merge_defaults(base.get("defaults") if isinstance(base, dict) else {}, other.get("defaults") if isinstance(other, dict) else {})
+    if defaults:
+        result["defaults"] = defaults
+
+    policy = merge_policy(base.get("policy"), other.get("policy"))
+    if policy:
+        result["policy"] = policy
+
+    mcp = merge_mcp(extract_mcp_servers(base), extract_mcp_servers(other))
+    if mcp:
+        result["mcpServers"] = mcp
+
+    for key, val in (other or {}).items():
+        if key in ("include", "defaults", "policy", "mcp", "mcpServers"):
+            continue
+        if key not in result:
+            result[key] = val
+        elif result[key] != val:
+            err(f"conflict for key '{key}'")
+
+    return result
+
+def resolve_doc(path, shared_root, depth, stack):
+    if depth > max_depth:
+        err(f"include depth exceeded ({max_depth}) at {path}")
+    abs_path = os.path.realpath(path)
+    if abs_path in stack:
+        err(f"include cycle detected at {path}")
+    stack.append(abs_path)
+    doc = load_json(path)
+    includes = doc.get("include", [])
+    if includes is None:
+        includes = []
+    if not isinstance(includes, list):
+        err(f"include must be an array in {path}")
+    merged = {}
+    for item in includes:
+        if not isinstance(item, dict):
+            err(f"include entries must be objects in {path}")
+        if "persona" in item and "file" in item:
+            err(f"include entry has both persona and file in {path}")
+        if "persona" in item:
+            name = item.get("persona")
+            if not isinstance(name, str) or not name:
+                err(f"include persona must be a non-empty string in {path}")
+            pdir = resolve_persona_dir(name)
+            if not pdir:
+                err(f"include persona not found: {name}")
+            pjson = find_persona_json(pdir)
+            if not pjson:
+                err(f"include persona.json not found for {name}")
+            next_shared = os.path.join(os.path.dirname(pdir), ".shared")
+            merged = merge_docs(merged, resolve_doc(pjson, next_shared, depth + 1, stack))
+            continue
+        if "file" in item:
+            rel = item.get("file")
+            fpath = resolve_shared_file(rel, shared_root)
+            merged = merge_docs(merged, resolve_doc(fpath, shared_root, depth + 1, stack))
+            continue
+        err(f"include entry missing persona or file in {path}")
+
+    doc_no_include = {k: v for k, v in doc.items() if k != "include"}
+    merged = merge_docs(merged, doc_no_include)
+    stack.pop()
+    return merged
+
+shared_root = os.path.join(os.path.dirname(persona_dir), ".shared")
+result = resolve_doc(json_path, shared_root, 1, [])
+json.dump(result, sys.stdout)
+PY
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    rm -f "$tmp" 2>/dev/null || true
+    die "persona.json include resolution failed for $json_path"
+  fi
+  include_tmp_files+=("$tmp")
+  echo "$tmp"
 }
 
 extract_mcp_config() {
@@ -322,7 +650,11 @@ except Exception:
     sys.exit(0)
 
 policy = j.get("policy", {})
+if not isinstance(policy, dict):
+    policy = {}
 tools = policy.get("tools", {})
+if not isinstance(tools, dict):
+    tools = {}
 allow = tools.get("allow", [])
 if not isinstance(allow, list):
     sys.exit(0)
@@ -348,8 +680,10 @@ EMIT_MAPS = {
 
 emit_map = EMIT_MAPS.get(tool_family, {})
 for tool in allow:
+    if not isinstance(tool, str):
+        continue
     canonical = tool.lower()
-    emitted = emit_map.get(canonical, canonical)
+    emitted = emit_map.get(canonical, tool)
     print(emitted)
 PY
 }
@@ -370,7 +704,11 @@ except Exception:
     sys.exit(0)
 
 policy = j.get("policy", {})
+if not isinstance(policy, dict):
+    policy = {}
 tools = policy.get("tools", {})
+if not isinstance(tools, dict):
+    tools = {}
 deny = tools.get("deny", [])
 if not isinstance(deny, list):
     sys.exit(0)
@@ -396,8 +734,10 @@ EMIT_MAPS = {
 
 emit_map = EMIT_MAPS.get(tool_family, {})
 for tool in deny:
+    if not isinstance(tool, str):
+        continue
     canonical = tool.lower()
-    emitted = emit_map.get(canonical, canonical)
+    emitted = emit_map.get(canonical, tool)
     print(emitted)
 PY
 }
@@ -418,7 +758,11 @@ except Exception:
     sys.exit(0)
 
 policy = j.get("policy", {})
+if not isinstance(policy, dict):
+    policy = {}
 paths = policy.get("paths", {})
+if not isinstance(paths, dict):
+    paths = {}
 deny_paths = paths.get("deny", [])
 
 if not isinstance(deny_paths, list) or not deny_paths:
@@ -461,7 +805,7 @@ except Exception:
     sys.exit(0)
 
 policy = j.get("policy", {})
-if not policy:
+if not isinstance(policy, dict) or not policy:
     sys.exit(0)
 
 settings = {"tools": {}, "mcp": {}}
@@ -474,11 +818,15 @@ GEMINI_MAP = {
 
 # tools.allow -> tools.core
 tools = policy.get("tools", {})
+if not isinstance(tools, dict):
+    tools = {}
 if isinstance(tools.get("allow"), list):
     core = []
     for t in tools["allow"]:
+        if not isinstance(t, str):
+            continue
         canonical = t.lower()
-        core.append(GEMINI_MAP.get(canonical, canonical))
+        core.append(GEMINI_MAP.get(canonical, t))
     if core:
         settings["tools"]["core"] = core
 
@@ -486,20 +834,29 @@ if isinstance(tools.get("allow"), list):
 if isinstance(tools.get("deny"), list):
     exclude = []
     for t in tools["deny"]:
+        if not isinstance(t, str):
+            continue
         canonical = t.lower()
-        exclude.append(GEMINI_MAP.get(canonical, canonical))
+        exclude.append(GEMINI_MAP.get(canonical, t))
     if exclude:
         settings["tools"]["exclude"] = exclude
 
 # mcpServers.allow/deny
 mcp = policy.get("mcpServers", {})
+if not isinstance(mcp, dict):
+    mcp = {}
 if isinstance(mcp.get("allow"), list) and mcp["allow"]:
     settings["mcp"]["allowed"] = mcp["allow"]
 if isinstance(mcp.get("deny"), list) and mcp["deny"]:
     settings["mcp"]["excluded"] = mcp["deny"]
 
+# Optional: disable IDE integration to avoid companion dependency
+disable_ide = os.environ.get("AGENT_PERSONA_GEMINI_DISABLE_IDE", "").strip().lower()
+if disable_ide in ("1", "true", "yes"):
+    settings["ide"] = {"enabled": False}
+
 # Only write if we have something
-if not settings["tools"] and not settings["mcp"]:
+if not settings["tools"] and not settings["mcp"] and not settings.get("ide"):
     sys.exit(0)
 
 fd, tmp_path = tempfile.mkstemp(prefix="persona-gemini-settings-", suffix=".json")
@@ -525,7 +882,7 @@ except Exception:
     sys.exit(0)
 
 policy = j.get("policy", {})
-if not policy:
+if not isinstance(policy, dict) or not policy:
     sys.exit(0)
 
 config = {"tools": {}, "permission": {}}
@@ -538,19 +895,25 @@ OPENCODE_MAP = {
 }
 
 tools = policy.get("tools", {})
+if not isinstance(tools, dict):
+    tools = {}
 
 # tools.allow -> permission: { name: "allow" }
 if isinstance(tools.get("allow"), list):
     for t in tools["allow"]:
+        if not isinstance(t, str):
+            continue
         canonical = t.lower()
-        mapped = OPENCODE_MAP.get(canonical, canonical)
+        mapped = OPENCODE_MAP.get(canonical, t)
         config["permission"][mapped] = "allow"
 
 # tools.deny -> tools: { name: false }
 if isinstance(tools.get("deny"), list):
     for t in tools["deny"]:
+        if not isinstance(t, str):
+            continue
         canonical = t.lower()
-        mapped = OPENCODE_MAP.get(canonical, canonical)
+        mapped = OPENCODE_MAP.get(canonical, t)
         config["tools"][mapped] = False
 
 # Only write if we have something
@@ -580,16 +943,16 @@ except Exception:
     sys.exit(0)
 
 policy = j.get("policy", {})
-if not policy:
+if not isinstance(policy, dict) or not policy:
     sys.exit(0)
 
 overrides = []
 
 # paths.allow -> sandbox_mode + writable_roots
 paths = policy.get("paths", {})
+if not isinstance(paths, dict):
+    paths = {}
 if isinstance(paths.get("allow"), list) and paths["allow"]:
-    overrides.append('sandbox_mode="workspace-write"')
-
     # Normalize paths to absolute
     abs_paths = []
     for p in paths["allow"]:
@@ -605,17 +968,22 @@ if isinstance(paths.get("allow"), list) and paths["allow"]:
             abs_paths.append(os.path.normpath(os.path.join(repo_root, p)))
 
     if abs_paths:
+        overrides.append('sandbox_mode="workspace-write"')
         overrides.append(f'sandbox_workspace_write.writable_roots={json.dumps(abs_paths)}')
 
 # network.deny -> network_access=false
 network = policy.get("network", {})
+if not isinstance(network, dict):
+    network = {}
 if isinstance(network.get("deny"), list) and "*" in network["deny"]:
     overrides.append('sandbox_workspace_write.network_access=false')
 
 # tools.deny (websearch) -> features.web_search_request=false
 tools = policy.get("tools", {})
+if not isinstance(tools, dict):
+    tools = {}
 if isinstance(tools.get("deny"), list):
-    deny_lower = [t.lower() for t in tools["deny"]]
+    deny_lower = [t.lower() for t in tools["deny"] if isinstance(t, str)]
     if "websearch" in deny_lower:
         overrides.append('features.web_search_request=false')
 
@@ -635,6 +1003,181 @@ resolve_instruction_file() {
   else
     echo "$persona_dir/AGENTS.md"
   fi
+}
+
+expand_includes() {
+  local src="$1" overlay_name="$2" shared_root="$3" include_root="$4" prefer_repo="$5" extra_paths="$6" persona_home="$7"
+  [[ -f "$src" ]] || die "include source not found: $src"
+
+  if ! grep -q '<!--[[:space:]]*include' "$src" 2>/dev/null; then
+    echo "$src"
+    return 0
+  fi
+
+  local py="python3"
+  command -v python3 >/dev/null 2>&1 || py="python"
+  command -v "$py" >/dev/null 2>&1 || die "include directives require python (python3 or python)"
+
+  local tmp
+  tmp="$(mktemp -p "${TMPDIR:-/tmp}" "agent-persona.include.XXXXXX")"
+  set +e
+  AP_ROOT="$include_root" AP_PREFER_REPO="$prefer_repo" AP_EXTRA_PATHS="$extra_paths" \
+    AP_PERSONA_HOME="$persona_home" AP_HOME="$HOME" AP_INCLUDE_DEPTH="$INCLUDE_DEPTH" \
+    "$py" - "$src" "$overlay_name" "$shared_root" <<'PY' > "$tmp"
+import json
+import os
+import re
+import sys
+
+src_path = sys.argv[1]
+overlay_name = sys.argv[2]
+shared_root = sys.argv[3]
+
+def err(msg):
+    print(f"include error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+pattern = re.compile(r"<!--\s*include\s+(\{.*?\})\s*-->")
+
+root = os.path.abspath(os.environ.get("AP_ROOT") or os.getcwd())
+prefer_repo = os.environ.get("AP_PREFER_REPO", "1") == "1"
+extra_paths = [p for p in os.environ.get("AP_EXTRA_PATHS", "").split(":") if p]
+home = os.environ.get("AP_HOME") or ""
+persona_home = os.environ.get("AP_PERSONA_HOME") or os.path.join(home, ".local/share/agent-persona")
+max_depth = int(os.environ.get("AP_INCLUDE_DEPTH", "10"))
+
+def has_persona(base, name):
+    if not base:
+        return None
+    cand = os.path.join(base, name, "AGENTS.md")
+    if os.path.isfile(cand):
+        return os.path.dirname(cand)
+    return None
+
+def scan_repo_upwards(start, name):
+    d = os.path.abspath(start)
+    while True:
+        for base in (".personas", ".persona"):
+            found = has_persona(os.path.join(d, base), name)
+            if found:
+                return found
+        if d == "/":
+            break
+        d = os.path.dirname(d)
+    return None
+
+def resolve_persona_dir(name):
+    if prefer_repo:
+        found = scan_repo_upwards(root, name)
+        if found:
+            return found
+    for p in extra_paths:
+        found = has_persona(p, name)
+        if found:
+            return found
+    for base in (os.path.join(home, ".personas"), os.path.join(persona_home, ".personas"), "/usr/local/share/agent-persona/.personas"):
+        found = has_persona(base, name)
+        if found:
+            return found
+    if not prefer_repo:
+        found = scan_repo_upwards(root, name)
+        if found:
+            return found
+    return None
+
+def resolve_instruction_file(persona_dir, overlay):
+    tool_specific = os.path.join(persona_dir, overlay)
+    if overlay != "AGENTS.md" and os.path.isfile(tool_specific):
+        return tool_specific
+    default_path = os.path.join(persona_dir, "AGENTS.md")
+    if os.path.isfile(default_path):
+        return default_path
+    return None
+
+def resolve_shared_file(rel_path, base_root):
+    if not base_root:
+        err(f"shared root not set for file include: {rel_path}")
+    if not isinstance(rel_path, str) or not rel_path:
+        err("include file path must be a non-empty string")
+    if os.path.isabs(rel_path) or rel_path.startswith("~"):
+        err(f"include file must be relative to shared root: {rel_path}")
+    base = os.path.abspath(base_root)
+    target = os.path.abspath(os.path.join(base, rel_path))
+    if os.path.commonpath([base, target]) != base:
+        err(f"include file escapes shared root: {rel_path}")
+    if not os.path.isfile(target):
+        err(f"include file not found: {target}")
+    return target
+
+def expand_line(line, base_root, depth, stack, path, line_no):
+    if "<!--" not in line:
+        return line
+    if "<!-- include" in line and not pattern.search(line):
+        err(f"{path}:{line_no}: include directive must be JSON on a single line")
+    out = []
+    last = 0
+    for match in pattern.finditer(line):
+        out.append(line[last:match.start()])
+        raw = match.group(1)
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            err(f"{path}:{line_no}: invalid include JSON: {e}")
+        if not isinstance(data, dict):
+            err(f"{path}:{line_no}: include entry must be an object")
+        if "persona" in data and "file" in data:
+            err(f"{path}:{line_no}: include has both persona and file")
+        if "persona" in data:
+            name = data.get("persona")
+            if not isinstance(name, str) or not name:
+                err(f"{path}:{line_no}: include persona must be a non-empty string")
+            pdir = resolve_persona_dir(name)
+            if not pdir:
+                err(f"{path}:{line_no}: include persona not found: {name}")
+            target = resolve_instruction_file(pdir, overlay_name)
+            if not target:
+                err(f"{path}:{line_no}: include persona missing instructions: {name}")
+            next_shared = os.path.join(os.path.dirname(pdir), ".shared")
+            out.append(expand_file(target, next_shared, depth + 1, stack))
+        elif "file" in data:
+            rel = data.get("file")
+            target = resolve_shared_file(rel, base_root)
+            out.append(expand_file(target, base_root, depth + 1, stack))
+        else:
+            err(f"{path}:{line_no}: include entry missing persona or file")
+        last = match.end()
+    out.append(line[last:])
+    return "".join(out)
+
+def expand_file(path, base_root, depth, stack):
+    if depth > max_depth:
+        err(f"include depth exceeded ({max_depth}) at {path}")
+    abs_path = os.path.realpath(path)
+    if abs_path in stack:
+        err(f"include cycle detected at {path}")
+    stack.append(abs_path)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines(True)
+    except Exception as e:
+        err(f"failed to read {path}: {e}")
+    out_lines = []
+    for idx, line in enumerate(lines, start=1):
+        out_lines.append(expand_line(line, base_root, depth, stack, path, idx))
+    stack.pop()
+    return "".join(out_lines)
+
+output = expand_file(src_path, shared_root, 1, [])
+sys.stdout.write(output)
+PY
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    rm -f "$tmp" 2>/dev/null || true
+    die "include expansion failed for $src"
+  fi
+  include_tmp_files+=("$tmp")
+  echo "$tmp"
 }
 
 # --- Helper: normalize persona directory (handles file-vs-dir profiles) ---
@@ -746,9 +1289,107 @@ filter_user_args() {
       filtered+=("$arg")
     fi
 
-    (( i++ ))
+    (( ++i ))
     if (( skip_next == 1 && i < n )); then
-      (( i++ ))
+      (( ++i ))
+    fi
+  done
+
+  printf '%s\0' "${filtered[@]}"
+}
+
+# --- Helper: filter persona/tool defaults when user overrides them ---
+# Goal: user args should override persona.json defaults even for "first one wins" CLIs.
+# Inputs:
+#   filter_defaults_by_user_overrides <tool> <defaults...> -- <user_args...>
+# Output: null-delimited filtered defaults
+filter_defaults_by_user_overrides() {
+  local tool="$1"
+  shift
+
+  local -a defaults=() user_args=()
+  local parsing_defaults=1
+  for a in "$@"; do
+    if [[ "$parsing_defaults" == "1" && "$a" == "--" ]]; then
+      parsing_defaults=0
+      continue
+    fi
+    if [[ "$parsing_defaults" == "1" ]]; then
+      defaults+=("$a")
+    else
+      user_args+=("$a")
+    fi
+  done
+
+  declare -A user_flags=()
+  declare -A user_kv_keys=()
+
+  # Track user-provided flags and Codex -c key overrides
+  local i=0 n=${#user_args[@]}
+  while (( i < n )); do
+    local arg="${user_args[i]}"
+    if [[ "$arg" == --*=* ]]; then
+      user_flags["${arg%%=*}"]=1
+    elif [[ "$arg" == --* ]]; then
+      user_flags["$arg"]=1
+    elif [[ "$tool" == "codex" && "$arg" == "-c" ]]; then
+      local next="${user_args[i+1]:-}"
+      local key="${next%%=*}"
+      [[ -n "$key" ]] && user_kv_keys["$key"]=1
+      (( ++i ))
+    fi
+    (( ++i ))
+  done
+
+  local -a tool_value_flags=()
+  case "$tool" in
+    claude|claude-code)
+      tool_value_flags=(--permission-mode --tools --allowedTools --disallowedTools --settings --mcp-config)
+      ;;
+  esac
+
+  declare -A value_flag_set=()
+  for f in "${tool_value_flags[@]}"; do value_flag_set["$f"]=1; done
+
+  local -a filtered=()
+  i=0
+  n=${#defaults[@]}
+  while (( i < n )); do
+    local arg="${defaults[i]}"
+    local skip=0
+    local skip_next=0
+
+    # Tool: codex -c key=... defaults overridden by user -c key=...
+    if [[ "$tool" == "codex" && "$arg" == "-c" ]]; then
+      local next="${defaults[i+1]:-}"
+      local key="${next%%=*}"
+      if [[ -n "$key" && -n "${user_kv_keys[$key]:-}" ]]; then
+        skip=1
+        skip_next=1
+      fi
+    fi
+
+    # Common: exact flag match or flag=... overridden by user
+    if (( skip == 0 )); then
+      local flag_name="$arg"
+      if [[ "$arg" == --*=* ]]; then
+        flag_name="${arg%%=*}"
+      fi
+      if [[ -n "${user_flags[$flag_name]:-}" ]]; then
+        skip=1
+        if [[ "$arg" != --*=* && -n "${value_flag_set[$flag_name]:-}" ]]; then
+          skip_next=1
+        fi
+      fi
+    fi
+
+    if (( skip == 0 )); then
+      filtered+=("$arg")
+    fi
+
+    (( ++i ))
+    if (( skip_next == 1 && i < n )); then
+      (( ++i ))
     fi
   done
 
@@ -763,36 +1404,61 @@ check_strict_policy() {
   local py="python3"
   command -v python3 >/dev/null 2>&1 || py="python"
 
-  # Get policy elements
-  local policy_json
-  policy_json="$("$py" - "$json_cfg" <<'PY' 2>/dev/null || echo "{}"
+  # Get policy elements with safe parsing (avoid shell quoting issues)
+  local has_tools_allow=0 has_tools_deny=0 has_paths_allow=0 has_paths_deny=0
+  local has_network_deny=0 bash_allowed=1
+  local policy_flags
+  policy_flags="$("$py" - "$json_cfg" <<'PY' 2>/dev/null || true
 import json, sys
 try:
-    with open(sys.argv[1]) as f:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
         j = json.load(f)
-    print(json.dumps(j.get("policy", {})))
-except:
-    print("{}")
+except Exception:
+    sys.exit(1)
+
+policy = j.get("policy", {})
+if not isinstance(policy, dict):
+    sys.exit(2)
+
+tools = policy.get("tools", {})
+if not isinstance(tools, dict):
+    tools = {}
+paths = policy.get("paths", {})
+if not isinstance(paths, dict):
+    paths = {}
+network = policy.get("network", {})
+if not isinstance(network, dict):
+    network = {}
+
+allow_tools = [t for t in tools.get("allow", []) if isinstance(t, str)]
+deny_tools = [t for t in tools.get("deny", []) if isinstance(t, str)]
+has_tools_allow = 1 if allow_tools else 0
+has_tools_deny = 1 if deny_tools else 0
+
+allow_paths = [p for p in paths.get("allow", []) if isinstance(p, str)]
+deny_paths = [p for p in paths.get("deny", []) if isinstance(p, str)]
+has_paths_allow = 1 if allow_paths else 0
+has_paths_deny = 1 if deny_paths else 0
+
+net_deny = network.get("deny", [])
+has_network_deny = 1 if isinstance(net_deny, list) and "*" in net_deny else 0
+
+allow_lower = [t.lower() for t in allow_tools]
+deny_lower = [t.lower() for t in deny_tools]
+if allow_lower:
+    bash_allowed = 1 if "bash" in allow_lower else 0
+else:
+    bash_allowed = 0 if "bash" in deny_lower else 1
+
+print(f"{has_tools_allow} {has_tools_deny} {has_paths_allow} {has_paths_deny} {has_network_deny} {bash_allowed}")
 PY
 )"
 
-  # Check tools.allow/deny
-  local has_tools_allow has_tools_deny
-  has_tools_allow=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if p.get('tools',{}).get('allow') else 0)" 2>/dev/null || echo 0)
-  has_tools_deny=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if p.get('tools',{}).get('deny') else 0)" 2>/dev/null || echo 0)
-
-  # Check paths.allow/deny
-  local has_paths_allow has_paths_deny
-  has_paths_allow=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if p.get('paths',{}).get('allow') else 0)" 2>/dev/null || echo 0)
-  has_paths_deny=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if p.get('paths',{}).get('deny') else 0)" 2>/dev/null || echo 0)
-
-  # Check network.deny
-  local has_network_deny
-  has_network_deny=$("$py" -c "import json; p=json.loads('$policy_json'); print(1 if '*' in p.get('network',{}).get('deny',[]) else 0)" 2>/dev/null || echo 0)
-
-  # Check bash allowed (for network deny evaluation)
-  local bash_allowed
-  bash_allowed=$("$py" -c "import json; p=json.loads('$policy_json'); a=p.get('tools',{}).get('allow',[]); print(1 if not a or 'bash' in [x.lower() for x in a] else 0)" 2>/dev/null || echo 1)
+  if [[ -z "$policy_flags" ]]; then
+    failures+=("policy: failed to parse policy JSON")
+  else
+    read -r has_tools_allow has_tools_deny has_paths_allow has_paths_deny has_network_deny bash_allowed <<<"$policy_flags"
+  fi
 
   case "$tool" in
     claude|claude-code)
@@ -899,6 +1565,13 @@ cmd_print_policy() {
   for cand in "$persona_dir/persona.json" "$persona_dir/Persona.json" "$persona_dir/config.json"; do
     [[ -f "$cand" ]] && { json_cfg="$cand"; break; }
   done
+  local json_cfg_resolved="$json_cfg"
+  if [[ -n "$json_cfg" ]]; then
+    local PREFER_REPO="${AGENT_PERSONA_PREFER_REPO:-1}"
+    local EXTRA_PATHS="${AGENT_PERSONA_PATHS:-}"
+    json_cfg_resolved="$(resolve_persona_json "$json_cfg" "$persona_dir" "$root" "$PREFER_REPO" "$EXTRA_PATHS" "$PERSONA_HOME")"
+    [[ -n "$json_cfg_resolved" ]] || json_cfg_resolved="$json_cfg"
+  fi
 
   echo "=== Policy Summary ==="
   echo ""
@@ -915,13 +1588,13 @@ cmd_print_policy() {
   echo "AGENT_PERSONA_OVERLAY_FILE=$overlay_name"
   echo ""
 
-  if [[ -z "$json_cfg" ]]; then
+  if [[ -z "$json_cfg_resolved" ]]; then
     echo "=== Policy ==="
     echo "(no persona.json found)"
     return 0
   fi
 
-  if ! policy_exists_in_json "$json_cfg"; then
+  if ! policy_exists_in_json "$json_cfg_resolved"; then
     echo "=== Policy ==="
     echo "(no policy block in persona.json)"
     return 0
@@ -932,9 +1605,16 @@ cmd_print_policy() {
   echo ""
 
   echo "=== Policy Content ==="
-  local py="python3"
-  command -v python3 >/dev/null 2>&1 || py="python"
-  "$py" - "$json_cfg" <<'PY'
+  local py=""
+  if command -v python3 >/dev/null 2>&1; then
+    py="python3"
+  elif command -v python >/dev/null 2>&1; then
+    py="python"
+  fi
+  if [[ -z "$py" ]]; then
+    echo "(python not found; unable to parse policy)"
+  else
+    "$py" - "$json_cfg_resolved" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1]) as f:
@@ -944,22 +1624,23 @@ try:
 except Exception as e:
     print(f"Error: {e}")
 PY
+  fi
   echo ""
 
   echo "=== Policy Translation for $tool ==="
   case "$tool" in
     claude|claude-code)
       echo "Tool flags:"
-      mapfile -t allowed < <(policy_tools_allow "$json_cfg" "claude")
+      mapfile -t allowed < <(policy_tools_allow "$json_cfg_resolved" "claude")
       if (( ${#allowed[@]} > 0 )); then
-        echo "  --tools $(IFS=','; echo "${allowed[*]}")"
+        echo "  --allowedTools $(IFS=','; echo "${allowed[*]}")"
       fi
-      mapfile -t denied < <(policy_tools_deny "$json_cfg" "claude")
+      mapfile -t denied < <(policy_tools_deny "$json_cfg_resolved" "claude")
       if (( ${#denied[@]} > 0 )); then
-        echo "  --disallowedTools ${denied[*]}"
+        echo "  --disallowedTools $(IFS=','; echo "${denied[*]}")"
       fi
       local settings
-      settings="$(generate_claude_settings "$json_cfg" 2>/dev/null)" || settings=""
+      settings="$(generate_claude_settings "$json_cfg_resolved" 2>/dev/null)" || settings=""
       if [[ -n "$settings" && -f "$settings" ]]; then
         echo "  --settings <temp file with path deny rules>"
         rm -f "$settings"
@@ -970,13 +1651,13 @@ PY
       echo "Config overrides:"
       while IFS= read -r ov; do
         [[ -n "$ov" ]] && echo "  -c $ov"
-      done < <(codex_policy_overrides "$json_cfg" "$root")
+      done < <(codex_policy_overrides "$json_cfg_resolved" "$root")
       ;;
 
     gemini)
       echo "Settings file via GEMINI_CLI_SYSTEM_SETTINGS_PATH"
       local settings
-      settings="$(generate_gemini_settings "$json_cfg" 2>/dev/null)" || settings=""
+      settings="$(generate_gemini_settings "$json_cfg_resolved" 2>/dev/null)" || settings=""
       if [[ -n "$settings" && -f "$settings" ]]; then
         cat "$settings"
         rm -f "$settings"
@@ -986,7 +1667,7 @@ PY
     opencode)
       echo "Config file via OPENCODE_CONFIG"
       local config
-      config="$(generate_opencode_config "$json_cfg" 2>/dev/null)" || config=""
+      config="$(generate_opencode_config "$json_cfg_resolved" 2>/dev/null)" || config=""
       if [[ -n "$config" && -f "$config" ]]; then
         cat "$config"
         rm -f "$config"
@@ -1002,7 +1683,7 @@ PY
   echo "=== Enforcement Notes ==="
   case "$tool" in
     claude|claude-code)
-      echo "- tools.allow/deny: Strong (via --tools, --disallowedTools)"
+      echo "- tools.allow/deny: Strong (via --allowedTools, --disallowedTools)"
       echo "- paths.deny: Partial (Claude has edge-cases with MCP tools)"
       echo "- network.deny: Weak if bash allowed (shell can curl/wget)"
       ;;
@@ -1032,6 +1713,7 @@ cmd_init() {
 
   local personas_dir="$repo_root/.personas"
   local legacy_dir="$repo_root/.persona"
+  local shared_dir="$personas_dir/.shared"
 
   if [[ -d "$personas_dir" ]]; then
     info ".personas/ already exists at $repo_root"
@@ -1041,12 +1723,17 @@ cmd_init() {
     [[ -d "$legacy_dir" ]] && info "Note: legacy $legacy_dir/ exists (prefer $personas_dir/)"
   fi
 
-  if [[ ! -f "$personas_dir/meta.AGENTS.md" ]]; then
+  if [[ ! -d "$shared_dir" ]]; then
+    mkdir -p "$shared_dir"
+    info "  - Created $shared_dir/"
+  fi
+
+  if [[ ! -f "$shared_dir/meta.AGENTS.md" ]]; then
     # Create a starter meta file (ignored until edited)
-    default_meta_template > "$personas_dir/meta.AGENTS.md"
-    info "  - meta.AGENTS.md (repo-wide instructions; ignored until edited)"
+    default_meta_template > "$shared_dir/meta.AGENTS.md"
+    info "  - .shared/meta.AGENTS.md (repo-wide instructions; ignored until edited)"
   else
-    info "  - meta.AGENTS.md already exists"
+    info "  - .shared/meta.AGENTS.md already exists"
   fi
 
   if [[ ! -f "$personas_dir/README.md" ]]; then
@@ -1057,10 +1744,25 @@ This repository is set up for repo-local agent personas via `agent-persona`.
 
 ## Repo-wide instructions (meta)
 
-- `.personas/meta.AGENTS.md` is merged into every persona launched in this repo.
+- `.personas/.shared/meta.AGENTS.md` is merged into every persona launched in this repo.
 - The default template created by `agent-persona init` is ignored until you edit it.
 - Disable meta merge: `agent-persona ... --no-meta` or `AGENT_PERSONA_META=0`
 - Merge position: `--meta-position top|bottom` (default: top)
+
+## Shared blocks
+
+- Reusable instruction blocks live under `.personas/.shared/`.
+- Include them from any AGENTS/CLAUDE/GEMINI file:
+
+```md
+<!-- include {"file":"communication-discipline.md"} -->
+```
+
+- Example blocks created by `agent-persona init`:
+  - `.personas/.shared/agent-contract-posture.md`
+  - `.personas/.shared/communication-discipline.md`
+  - `.personas/.shared/knowledge-dilligence.md`
+  - `.personas/.shared/continuity.md`
 
 ## Add a persona
 
@@ -1103,13 +1805,194 @@ agent-persona gemini my-persona
 - If `unshare` isn’t available, it falls back to swap-and-restore. If you hard-kill the tool, run `agent-persona recover`.
 README
     info "  - README.md (how .personas/ works)"
-  else
-    info "  - README.md already exists"
-  fi
+	  else
+	    info "  - README.md already exists"
+	  fi
 
-  info ""
-  info "Next steps:"
-  info "  1. Edit .personas/meta.AGENTS.md with your project context"
+	  # Starter shared blocks (for include directives)
+	  if [[ ! -f "$shared_dir/agent-contract-posture.md" ]]; then
+	    cat > "$shared_dir/agent-contract-posture.md" <<'SNIP'
+# Agent Contract Posture
+
+This snippet defines how the agent should interpret the user’s intent, handle risk, and behave under uncertainty.
+
+## Default Stance
+
+- Prefer correctness and safety over speed.
+- Ask clarifying questions when requirements are ambiguous.
+- Keep changes focused; avoid scope creep.
+
+## Consent & Risk
+
+- Never run destructive commands (e.g., `rm -rf`, `git reset --hard`, `git clean -fdx`) unless the user explicitly asks.
+- Never expose secrets, credentials, tokens, or private keys.
+- If a request could have unintended side effects, explain the risk and ask before proceeding.
+
+## Reliability
+
+- Don’t guess. If information is missing, say what you need.
+- Validate changes with the smallest relevant checks/tests when available.
+SNIP
+	    info "  - .shared/agent-contract-posture.md (shared block)"
+	  else
+	    info "  - .shared/agent-contract-posture.md already exists"
+	  fi
+
+	  if [[ ! -f "$shared_dir/communication-discipline.md" ]]; then
+	    cat > "$shared_dir/communication-discipline.md" <<'SNIP'
+# Communication Discipline
+
+This snippet keeps interactions crisp, predictable, and easy to audit.
+
+## Style
+
+- Be concise and information-dense.
+- Use clear structure (headings/bullets) when it improves scanability.
+- Avoid filler acknowledgements; start with the answer/action.
+
+## Coordination
+
+- Confirm assumptions that materially affect the outcome.
+- When proposing a change, include the exact command(s) or file path(s) needed to verify it.
+- If something is blocked (permissions/network/tooling), say what would unblock it.
+SNIP
+	    info "  - .shared/communication-discipline.md (shared block)"
+	  else
+	    info "  - .shared/communication-discipline.md already exists"
+	  fi
+
+	  if [[ ! -f "$shared_dir/knowledge-dilligence.md" ]]; then
+	    cat > "$shared_dir/knowledge-dilligence.md" <<'SNIP'
+# Knowledge Dilligence
+
+This snippet reduces hallucinations and improves correctness when working with code, docs, or external tools.
+
+## Accuracy Rules
+
+- Don’t invent APIs, flags, or file paths; verify by reading the repo or running `--help`.
+- If you’re unsure, ask or propose a safe exploratory command.
+- When describing behavior, tie it to a specific implementation detail (function/file), not intuition.
+
+## Verification
+
+- Prefer deterministic checks (unit tests, parsing, static checks) over “it seems right”.
+- When something can’t be validated automatically, provide a minimal, explicit manual check.
+SNIP
+	    info "  - .shared/knowledge-dilligence.md (shared block)"
+	  else
+	    info "  - .shared/knowledge-dilligence.md already exists"
+	  fi
+
+	  if [[ ! -f "$shared_dir/continuity.md" ]]; then
+	    cat > "$shared_dir/continuity.md" <<'SNIP'
+# Continuity
+
+This snippet helps the agent maintain context and avoid regressions across multi-step work.
+
+## State Management
+
+- Keep an explicit list of decisions and constraints (what/why).
+- Don’t silently change previously agreed semantics; call it out if revisiting.
+- Prefer small, reversible changes; keep diffs easy to review.
+
+## Handoffs
+
+- Summarize what changed and where (file paths).
+- Call out remaining follow-ups, edge cases, and how to test.
+SNIP
+	    info "  - .shared/continuity.md (shared block)"
+	  else
+	    info "  - .shared/continuity.md already exists"
+	  fi
+
+	  # Starter personas (blank + template)
+	  local blank_dir="$personas_dir/blank"
+	  if [[ ! -d "$blank_dir" ]]; then
+	    mkdir -p "$blank_dir"
+	    info "  - Created blank/ persona"
+	  fi
+	  if [[ ! -f "$blank_dir/AGENTS.md" ]]; then
+	    : > "$blank_dir/AGENTS.md"
+	    info "  - blank/AGENTS.md (empty persona)"
+	  else
+	    info "  - blank/AGENTS.md already exists"
+	  fi
+
+	  local template_dir="$personas_dir/template"
+	  if [[ ! -d "$template_dir" ]]; then
+	    mkdir -p "$template_dir"
+	    info "  - Created template/ persona"
+	  fi
+	  if [[ ! -f "$template_dir/AGENTS.md" ]]; then
+	    cat > "$template_dir/AGENTS.md" <<'AGENTS'
+# Example Persona
+
+A demonstration persona showing a recommended structure for agent instruction files.
+
+## Shared Building Blocks
+
+<!-- include {"file":"agent-contract-posture.md"} -->
+<!-- include {"file":"communication-discipline.md"} -->
+<!-- include {"file":"knowledge-dilligence.md"} -->
+<!-- include {"file":"continuity.md"} -->
+
+## Purpose
+<!-- What is this agent's primary mission? Keep it to 1-2 sentences. -->
+Demonstrate best practices for writing agent personas.
+
+## Success Criteria
+<!-- How do we know the agent is doing its job well? -->
+- Responses follow the guidelines below
+- Work is documented and traceable
+- User intent is clarified before major actions
+
+## Scope
+**In scope:**
+- Tasks explicitly requested by the user
+- Clarifying questions when requirements are ambiguous
+
+**Out of scope:**
+- Autonomous actions beyond what was requested
+- Modifications to unrelated code or files
+
+## Operating Mode
+<!-- How should the agent behave? What's its default stance? -->
+- **Ask before acting** on anything that could have unintended consequences
+- **Explain reasoning** when making non-obvious decisions
+- **Stay focused** on the task at hand; avoid scope creep
+
+## Dials
+<!-- Tunable parameters. Adjust these to change agent behavior. -->
+| Dial | Setting | Notes |
+|------|---------|-------|
+| Autonomy | Medium | Ask for approval on significant changes |
+| Verbosity | Medium | Explain important decisions, skip trivia |
+| Tool use | As needed | Use tools when they help, not for show |
+
+## Guardrails
+<!-- Hard constraints that should never be violated -->
+- Never commit secrets or credentials
+- Never delete files without explicit confirmation
+- Never push to protected branches without review
+
+## Example Prompts
+<!-- Sample interactions to calibrate the agent -->
+
+**Good prompt:**
+> "Add input validation to the signup form. Check that email is valid and password is at least 8 characters."
+
+**Vague prompt (agent should clarify):**
+> "Make the app better."
+> Agent: "Could you clarify what aspect you'd like to improve? For example: performance, UX, code quality, or a specific feature?"
+AGENTS
+	    info "  - template/AGENTS.md (starter persona)"
+	  else
+	    info "  - template/AGENTS.md already exists"
+	  fi
+
+	  info ""
+	  info "Next steps:"
+  info "  1. Edit .personas/.shared/meta.AGENTS.md with your project context"
   info "  2. Add personas: mkdir .personas/my-persona && edit .personas/my-persona/AGENTS.md"
   info "  3. Launch: agent-persona claude my-persona"
 }
@@ -1330,7 +2213,11 @@ cmd_which() {
         meta_path=""
       fi
     else
-      for cand in ".personas/meta.AGENTS.md" ".personas/meta.agents.md" ".persona/meta.AGENTS.md" ".persona/meta.agents.md" "meta.AGENTS.md" "meta.agents.md"; do
+      for cand in ".personas/.shared/meta.AGENTS.md" ".personas/.shared/meta.agents.md" \
+        ".personas/meta.AGENTS.md" ".personas/meta.agents.md" \
+        ".persona/.shared/meta.AGENTS.md" ".persona/.shared/meta.agents.md" \
+        ".persona/meta.AGENTS.md" ".persona/meta.agents.md" \
+        "meta.AGENTS.md" "meta.agents.md"; do
         cand_path="$repo_root/$cand"
         if [[ -f "$cand_path" ]]; then
           if meta_is_unedited_template "$cand_path"; then
@@ -1429,9 +2316,20 @@ cmd_print_overlay() {
   persona_src="$(resolve_instruction_file "$persona_dir" "$overlay_name")"
   [[ -f "$persona_src" ]] || die "instruction file not found: $persona_src"
 
+  local include_root="$root"
+  local include_prefer_repo="${AGENT_PERSONA_PREFER_REPO:-1}"
+  local include_extra_paths="${AGENT_PERSONA_PATHS:-}"
+  local include_persona_home="${AGENT_PERSONA_HOME:-$HOME/.local/share/agent-persona}"
+  local persona_shared_root
+  persona_shared_root="$(dirname "$persona_dir")/.shared"
+  local persona_src_expanded
+  persona_src_expanded="$(expand_includes "$persona_src" "$overlay_name" "$persona_shared_root" \
+    "$include_root" "$include_prefer_repo" "$include_extra_paths" "$include_persona_home")"
+
   # Find and merge meta
   local repo_root meta_path=""
   repo_root="$(resolve_repo_root 2>/dev/null || echo "$root")"
+  local repo_shared_root="$repo_root/.personas/.shared"
 
   if [[ "$META_ENABLED" != "0" ]]; then
     if [[ -n "$META_FILE_OVERRIDE" ]]; then
@@ -1443,7 +2341,11 @@ cmd_print_overlay() {
         meta_path=""
       fi
     else
-      for cand in ".personas/meta.AGENTS.md" ".personas/meta.agents.md" ".persona/meta.AGENTS.md" ".persona/meta.agents.md" "meta.AGENTS.md" "meta.agents.md"; do
+      for cand in ".personas/.shared/meta.AGENTS.md" ".personas/.shared/meta.agents.md" \
+        ".personas/meta.AGENTS.md" ".personas/meta.agents.md" \
+        ".persona/.shared/meta.AGENTS.md" ".persona/.shared/meta.agents.md" \
+        ".persona/meta.AGENTS.md" ".persona/meta.agents.md" \
+        "meta.AGENTS.md" "meta.agents.md"; do
         cand_path="$repo_root/$cand"
         if [[ -f "$cand_path" ]]; then
           if meta_is_unedited_template "$cand_path"; then
@@ -1467,23 +2369,29 @@ cmd_print_overlay() {
   [[ -n "$meta_path" ]] && echo "# Meta: $meta_path (position: $META_POSITION)"
   echo ""
 
+  local meta_src_expanded=""
+  if [[ -n "$meta_path" ]]; then
+    meta_src_expanded="$(expand_includes "$meta_path" "$overlay_name" "$repo_shared_root" \
+      "$include_root" "$include_prefer_repo" "$include_extra_paths" "$include_persona_home")"
+  fi
+
   if [[ -n "$meta_path" && "$META_POSITION" == "top" ]]; then
     echo "<!-- meta -->"
-    cat "$meta_path"
+    cat "$meta_src_expanded"
     echo ""
     echo "<!-- /meta -->"
     echo ""
   fi
 
   echo "<!-- persona -->"
-  cat "$persona_src"
+  cat "$persona_src_expanded"
   echo ""
   echo "<!-- /persona -->"
 
   if [[ -n "$meta_path" && "$META_POSITION" == "bottom" ]]; then
     echo ""
     echo "<!-- meta -->"
-    cat "$meta_path"
+    cat "$meta_src_expanded"
     echo ""
     echo "<!-- /meta -->"
   fi
@@ -1563,12 +2471,13 @@ TOOLS:
   Or any executable on PATH
 
 FLAGS:
-  --no-meta                 Skip repo meta.AGENTS.md merge
+  --no-meta                 Skip repo meta merge (.personas/.shared/meta.AGENTS.md)
   --no-mcp                  Skip MCP injection from persona.json
+  --no-defaults             Skip persona/tool defaults injection
   --meta-file=<path>        Override meta file path
   --meta-position=top|bottom  Where to merge meta (default: top)
   --force-swap              Force swap-and-restore (skip unshare)
-  --strict-policy           Fail if policy cannot be enforced
+  --strict-policy           Enforce policy and fail if it cannot be enforced
   --version                 Show version
   -h, --help                Show this help
 
@@ -1579,7 +2488,11 @@ ENVIRONMENT:
   AGENT_PERSONA_META_POSITION=...   top or bottom
   AGENT_PERSONA_FORCE_SWAP=1        Force swap mode
   AGENT_PERSONA_MCP=0               Disable MCP injection
-  AGENT_PERSONA_STRICT_POLICY=1     Fail if policy cannot be enforced
+  AGENT_PERSONA_DEFAULTS=0          Disable persona/tool defaults
+  AGENT_PERSONA_STRICT_POLICY=1     Enforce policy and fail if it cannot be enforced
+  AGENT_PERSONA_GEMINI_DISABLE_IDE=1  Disable Gemini IDE mode
+  AGENT_PERSONA_GEMINI_FORCE_TTY=auto  Force pseudo-TTY for Gemini (auto|1|0)
+  AGENT_PERSONA_INCLUDE_DEPTH=10    Max include recursion depth
   AGENT_PERSONA_PATHS=<p1:p2:...>   Extra search paths
   AGENT_PERSONA_HOME=<path>         Persona home (contains .personas/)
 
@@ -1600,7 +2513,7 @@ OVERLAY BEHAVIOR:
     Use 'agent-persona recover' to restore after hard-kill.
 
 REPO META:
-  If .personas/meta.AGENTS.md matches the init template, it is ignored until you edit it.
+  If .personas/.shared/meta.AGENTS.md matches the init template, it is ignored until you edit it.
 
 EXAMPLES:
   agent-persona claude blank          # Launch Claude with blank persona
@@ -1665,6 +2578,9 @@ while [[ $# -gt 0 ]]; do
     --no-mcp)
       MCP_ENABLED="0"; shift
       ;;
+    --no-defaults)
+      DEFAULTS_ENABLED="0"; shift
+      ;;
     --meta-file=*)
       META_FILE_OVERRIDE="${1#*=}"; shift
       ;;
@@ -1726,6 +2642,15 @@ done
 root="${AGENT_PERSONA_ROOT:-$(pwd)}"
 cd "$root"
 root="$(pwd -P)"
+
+# --- gitguard (repo-local git safety wrapper) ---
+repo_root=""
+if command -v git >/dev/null 2>&1; then
+  repo_root="$(git -C \"$root\" rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [[ -n "${repo_root:-}" && -d "$repo_root/Scripts/gitguard/bin" ]]; then
+  export PATH="$repo_root/Scripts/gitguard/bin:$PATH"
+fi
 
 # --- Resolve persona ---
 PREFER_REPO="${AGENT_PERSONA_PREFER_REPO:-1}"
@@ -1811,17 +2736,23 @@ for cand in "$base_dir/persona.json" "$base_dir/Persona.json" "$base_dir/config.
   [[ -f "$cand" ]] && { json_cfg="$cand"; break; }
 done
 
-defaults=()
+json_cfg_resolved="$json_cfg"
 if [[ -n "$json_cfg" ]]; then
+  json_cfg_resolved="$(resolve_persona_json "$json_cfg" "$persona_dir" "$root" "$PREFER_REPO" "$EXTRA_PATHS" "$PERSONA_HOME")"
+  [[ -n "$json_cfg_resolved" ]] || json_cfg_resolved="$json_cfg"
+fi
+
+defaults=()
+if [[ "$DEFAULTS_ENABLED" != "0" && -n "$json_cfg_resolved" ]]; then
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     defaults+=( "$line" )
-  done < <(defaults_from_json "$json_cfg" "$tool")
+  done < <(defaults_from_json "$json_cfg_resolved" "$tool")
 fi
 
 # --- Detect policy in persona.json ---
 has_policy=0
-if [[ -n "$json_cfg" ]] && policy_exists_in_json "$json_cfg"; then
+if [[ -n "$json_cfg_resolved" ]] && policy_exists_in_json "$json_cfg_resolved"; then
   has_policy=1
   log "policy detected in persona.json"
 
@@ -1840,46 +2771,54 @@ case "$tool" in
     elif command -v claude-code >/dev/null 2>&1; then
       tool_cmd="claude-code"
     fi
-    # Default permission mode (skip if policy exists - policy controls permissions)
-    if [[ $has_policy -eq 0 ]]; then
-      has_perm=0
-      for a in "${pass_args[@]}" "${defaults[@]}"; do
-        [[ "$a" == "--permission-mode"* || "$a" == "--dangerously-skip-permissions" ]] && has_perm=1
-      done
-      [[ $has_perm -eq 0 ]] && defaults+=(--permission-mode bypassPermissions)
+    if [[ "$DEFAULTS_ENABLED" != "0" ]]; then
+      # Default permission mode (skip if policy exists - policy controls permissions)
+      if [[ $has_policy -eq 0 ]]; then
+        has_perm=0
+        for a in "${pass_args[@]}" "${defaults[@]}"; do
+          [[ "$a" == "--permission-mode"* || "$a" == "--dangerously-skip-permissions" ]] && has_perm=1
+        done
+        [[ $has_perm -eq 0 ]] && defaults+=(--permission-mode bypassPermissions)
+      else
+        log "policy present, skipping default --permission-mode bypassPermissions"
+      fi
     else
-      log "policy present, skipping default --permission-mode bypassPermissions"
+      log "defaults disabled, skipping Claude permission default"
     fi
     ;;
   codex)
-    # Default to --full-auto unless already specified (skip if policy exists)
-    if [[ $has_policy -eq 0 ]]; then
-      has_auto=0
-      for a in "${pass_args[@]}" "${defaults[@]}"; do
-        [[ "$a" == "--full-auto" || "$a" == "--yolo" || "$a" == "--dangerously-bypass-approvals-and-sandbox" ]] && has_auto=1
-      done
-      [[ $has_auto -eq 0 ]] && defaults+=(--full-auto)
+    if [[ "$DEFAULTS_ENABLED" != "0" ]]; then
+      # Default to --full-auto unless already specified (skip if policy exists)
+      if [[ $has_policy -eq 0 ]]; then
+        has_auto=0
+        for a in "${pass_args[@]}" "${defaults[@]}"; do
+          [[ "$a" == "--full-auto" || "$a" == "--yolo" || "$a" == "--dangerously-bypass-approvals-and-sandbox" ]] && has_auto=1
+        done
+        [[ $has_auto -eq 0 ]] && defaults+=(--full-auto)
+      else
+        log "policy present, skipping default --full-auto"
+      fi
     else
-      log "policy present, skipping default --full-auto"
+      log "defaults disabled, skipping Codex auto default"
     fi
     ;;
 esac
 
 # --- MCP servers (persona.json) ---
-if [[ "$MCP_ENABLED" != "0" && -n "$json_cfg" && "$tool" == "codex" ]]; then
+if [[ "$MCP_ENABLED" != "0" && -n "$json_cfg_resolved" && "$tool" == "codex" ]]; then
   while IFS= read -r ov; do
     [[ -n "$ov" ]] || continue
     defaults+=( -c "$ov" )
-  done < <(codex_mcp_overrides_from_json "$json_cfg")
+  done < <(codex_mcp_overrides_from_json "$json_cfg_resolved")
 fi
 
-if [[ "$MCP_ENABLED" != "0" && -n "$json_cfg" && ( "$tool" == "claude" || "$tool" == "claude-code" ) ]]; then
+if [[ "$MCP_ENABLED" != "0" && -n "$json_cfg_resolved" && ( "$tool" == "claude" || "$tool" == "claude-code" ) ]]; then
   have_mcp_config=0
   for a in "${pass_args[@]}" "${defaults[@]}"; do
     [[ "$a" == "--mcp-config" || "$a" == --mcp-config=* ]] && have_mcp_config=1
   done
   if [[ $have_mcp_config -eq 0 ]]; then
-    mcp_config_file="$(extract_mcp_config "$json_cfg")" || mcp_config_file=""
+    mcp_config_file="$(extract_mcp_config "$json_cfg_resolved")" || mcp_config_file=""
     if [[ -n "$mcp_config_file" && -f "$mcp_config_file" ]]; then
       log "MCP config extracted to: $mcp_config_file"
       defaults+=( --mcp-config "$mcp_config_file" )
@@ -1889,28 +2828,29 @@ fi
 
 # --- Policy translation (populate policy_args for enforcement) ---
 policy_args=()
-if [[ $has_policy -eq 1 && -n "$json_cfg" ]]; then
+if [[ $has_policy -eq 1 && -n "$json_cfg_resolved" ]]; then
   log "translating policy for tool: $tool"
 
   case "$tool" in
     claude|claude-code)
-      # tools.allow -> --tools (comma-separated)
-      mapfile -t allowed_tools < <(policy_tools_allow "$json_cfg" "claude")
+      # tools.allow -> --allowedTools (comma-separated)
+      mapfile -t allowed_tools < <(policy_tools_allow "$json_cfg_resolved" "claude")
       if (( ${#allowed_tools[@]} > 0 )); then
         allowed_csv=$(IFS=','; echo "${allowed_tools[*]}")
-        policy_args+=(--tools "$allowed_csv")
-        log "policy: --tools $allowed_csv"
+        policy_args+=(--allowedTools "$allowed_csv")
+        log "policy: --allowedTools $allowed_csv"
       fi
 
       # tools.deny -> --disallowedTools
-      mapfile -t denied_tools < <(policy_tools_deny "$json_cfg" "claude")
+      mapfile -t denied_tools < <(policy_tools_deny "$json_cfg_resolved" "claude")
       if (( ${#denied_tools[@]} > 0 )); then
-        policy_args+=(--disallowedTools "${denied_tools[@]}")
-        log "policy: --disallowedTools ${denied_tools[*]}"
+        denied_csv=$(IFS=','; echo "${denied_tools[*]}")
+        policy_args+=(--disallowedTools "$denied_csv")
+        log "policy: --disallowedTools $denied_csv"
       fi
 
       # paths.deny -> --settings (temp JSON file)
-      claude_settings_file="$(generate_claude_settings "$json_cfg")" || claude_settings_file=""
+      claude_settings_file="$(generate_claude_settings "$json_cfg_resolved")" || claude_settings_file=""
       if [[ -n "$claude_settings_file" && -f "$claude_settings_file" ]]; then
         policy_args+=(--settings "$claude_settings_file")
         log "policy: --settings $claude_settings_file"
@@ -1923,24 +2863,32 @@ if [[ $has_policy -eq 1 && -n "$json_cfg" ]]; then
         [[ -n "$ov" ]] || continue
         policy_args+=(-c "$ov")
         log "policy: -c $ov"
-      done < <(codex_policy_overrides "$json_cfg" "$root")
+      done < <(codex_policy_overrides "$json_cfg_resolved" "$root")
       ;;
 
     gemini)
-      # Generate settings file and set env var
-      gemini_settings_file="$(generate_gemini_settings "$json_cfg")" || gemini_settings_file=""
-      if [[ -n "$gemini_settings_file" && -f "$gemini_settings_file" ]]; then
-        export GEMINI_CLI_SYSTEM_SETTINGS_PATH="$gemini_settings_file"
-        log "policy: GEMINI_CLI_SYSTEM_SETTINGS_PATH=$gemini_settings_file"
+      # Generate settings file and set env var (strict-policy enforces; otherwise allow user override via existing env)
+      if [[ "$STRICT_POLICY" == "1" || -z "${GEMINI_CLI_SYSTEM_SETTINGS_PATH:-}" ]]; then
+        gemini_settings_file="$(generate_gemini_settings "$json_cfg_resolved")" || gemini_settings_file=""
+        if [[ -n "$gemini_settings_file" && -f "$gemini_settings_file" ]]; then
+          export GEMINI_CLI_SYSTEM_SETTINGS_PATH="$gemini_settings_file"
+          log "policy: GEMINI_CLI_SYSTEM_SETTINGS_PATH=$gemini_settings_file"
+        fi
+      else
+        log "policy: GEMINI_CLI_SYSTEM_SETTINGS_PATH already set; skipping policy settings injection"
       fi
       ;;
 
     opencode)
-      # Generate config file and set env var
-      opencode_config_file="$(generate_opencode_config "$json_cfg")" || opencode_config_file=""
-      if [[ -n "$opencode_config_file" && -f "$opencode_config_file" ]]; then
-        export OPENCODE_CONFIG="$opencode_config_file"
-        log "policy: OPENCODE_CONFIG=$opencode_config_file"
+      # Generate config file and set env var (strict-policy enforces; otherwise allow user override via existing env)
+      if [[ "$STRICT_POLICY" == "1" || -z "${OPENCODE_CONFIG:-}" ]]; then
+        opencode_config_file="$(generate_opencode_config "$json_cfg_resolved")" || opencode_config_file=""
+        if [[ -n "$opencode_config_file" && -f "$opencode_config_file" ]]; then
+          export OPENCODE_CONFIG="$opencode_config_file"
+          log "policy: OPENCODE_CONFIG=$opencode_config_file"
+        fi
+      else
+        log "policy: OPENCODE_CONFIG already set; skipping policy config injection"
       fi
       ;;
 
@@ -1952,14 +2900,20 @@ if [[ $has_policy -eq 1 && -n "$json_cfg" ]]; then
 
   # Strict policy enforcement check
   if [[ "$STRICT_POLICY" == "1" ]]; then
-    check_strict_policy "$tool" "$json_cfg"
+    check_strict_policy "$tool" "$json_cfg_resolved"
   fi
 fi
+
+# --- Expand include directives in persona instructions ---
+persona_shared_root="$(dirname "$persona_dir")/.shared"
+link_target="$(expand_includes "$link_target" "$overlay_name" "$persona_shared_root" \
+  "$root" "$PREFER_REPO" "$EXTRA_PATHS" "$PERSONA_HOME")"
 
 # --- Merge repo meta if present ---
 meta_files=()
 if [[ "$META_ENABLED" != "0" ]]; then
   repo_root="$(resolve_repo_root 2>/dev/null || echo "$root")"
+  repo_shared_root="$repo_root/.personas/.shared"
 
   if [[ -n "$META_FILE_OVERRIDE" ]]; then
     meta_path="$META_FILE_OVERRIDE"
@@ -1972,7 +2926,11 @@ if [[ "$META_ENABLED" != "0" ]]; then
       fi
     fi
   else
-    for cand in ".personas/meta.AGENTS.md" ".personas/meta.agents.md" ".persona/meta.AGENTS.md" ".persona/meta.agents.md" "meta.AGENTS.md" "meta.agents.md"; do
+    for cand in ".personas/.shared/meta.AGENTS.md" ".personas/.shared/meta.agents.md" \
+      ".personas/meta.AGENTS.md" ".personas/meta.agents.md" \
+      ".persona/.shared/meta.AGENTS.md" ".persona/.shared/meta.agents.md" \
+      ".persona/meta.AGENTS.md" ".persona/meta.agents.md" \
+      "meta.AGENTS.md" "meta.agents.md"; do
       cand_path="$repo_root/$cand"
       if [[ -f "$cand_path" ]]; then
         if meta_is_unedited_template "$cand_path"; then
@@ -1987,12 +2945,18 @@ if [[ "$META_ENABLED" != "0" ]]; then
 fi
 
 if (( ${#meta_files[@]} > 0 )); then
+  meta_files_expanded=()
+  for p in "${meta_files[@]}"; do
+    meta_files_expanded+=( "$(expand_includes "$p" "$overlay_name" "$repo_shared_root" \
+      "$root" "$PREFER_REPO" "$EXTRA_PATHS" "$PERSONA_HOME")" )
+  done
+
   meta_tmp="$(mktemp -p "${TMPDIR:-/tmp}" "agent-persona.${overlay_name}.XXXXXX")"
 
   case "$META_POSITION" in
     top|prepend|before)
       {
-        for p in "${meta_files[@]}"; do
+        for p in "${meta_files_expanded[@]}"; do
           echo "<!-- meta -->"
           cat "$p"
           echo -e "\n<!-- /meta -->\n"
@@ -2007,7 +2971,7 @@ if (( ${#meta_files[@]} > 0 )); then
         echo "<!-- persona -->"
         cat "$link_target"
         echo -e "\n<!-- /persona -->\n"
-        for p in "${meta_files[@]}"; do
+        for p in "${meta_files_expanded[@]}"; do
           echo "<!-- meta -->"
           cat "$p"
           echo -e "\n<!-- /meta -->"
@@ -2023,24 +2987,97 @@ if (( ${#meta_files[@]} > 0 )); then
   log "meta merged ($META_POSITION): ${meta_files[*]}"
 fi
 
-# --- Build final args (3-way layering for policy enforcement) ---
-# Layer 1: default_args (persona defaults from persona.json)
-# Layer 2: filtered_user_args (pass-through with policy-controlled flags removed)
-# Layer 3: policy_args (enforcement - populated by policy translation above)
+# --- Build final args (defaults + policy + user; strict-policy flips precedence) ---
+# Precedence in normal mode: user args > policy > defaults
+# Precedence in strict-policy: policy > user args > defaults (policy-controlled user flags are removed)
 
-default_args=("${defaults[@]}")
-# policy_args already populated by policy translation section above
-
-# Filter user args if policy exists
-filtered_user_args=()
-if [[ $has_policy -eq 1 ]]; then
+# User tool args (may be filtered in strict-policy)
+user_args=("${pass_args[@]}")
+filtered_user_args=("${pass_args[@]}")
+if [[ $has_policy -eq 1 && "$STRICT_POLICY" == "1" ]]; then
   mapfile -d '' filtered_user_args < <(filter_user_args "$tool" "$has_policy" "${pass_args[@]}")
-else
-  filtered_user_args=("${pass_args[@]}")
 fi
 
-# Final assembly: defaults + filtered_user + policy (policy wins on conflicts)
-tool_args=("${default_args[@]}" "${filtered_user_args[@]}" "${policy_args[@]}")
+# Filter defaults when user overrides them (ensures user args win even for first-match CLIs)
+default_args=("${defaults[@]}")
+if (( ${#filtered_user_args[@]} > 0 && ${#default_args[@]} > 0 )); then
+  mapfile -d '' default_args < <(filter_defaults_by_user_overrides "$tool" "${default_args[@]}" -- "${filtered_user_args[@]}")
+fi
+
+# Filter policy args when user overrides them (normal mode only; ensures user args win even for first-match CLIs)
+policy_args_effective=("${policy_args[@]}")
+if [[ $has_policy -eq 1 && "$STRICT_POLICY" != "1" ]]; then
+  if (( ${#filtered_user_args[@]} > 0 && ${#policy_args_effective[@]} > 0 )); then
+    mapfile -d '' policy_args_effective < <(filter_defaults_by_user_overrides "$tool" "${policy_args_effective[@]}" -- "${filtered_user_args[@]}")
+  fi
+fi
+
+# Ensure policy overrides defaults regardless of tool precedence behavior
+if (( ${#policy_args_effective[@]} > 0 && ${#default_args[@]} > 0 )); then
+  mapfile -d '' default_args < <(filter_defaults_by_user_overrides "$tool" "${default_args[@]}" -- "${policy_args_effective[@]}")
+fi
+
+if [[ $has_policy -eq 1 && "$STRICT_POLICY" == "1" ]]; then
+  # Strict-policy: enforce policy (policy args come last)
+  tool_args=("${default_args[@]}" "${filtered_user_args[@]}" "${policy_args_effective[@]}")
+else
+  # Normal: user args override policy
+  tool_args=("${default_args[@]}" "${policy_args_effective[@]}" "${filtered_user_args[@]}")
+fi
+
+# --- Gemini: normalize non-TTY runs via pseudo-PTY (script) ---
+gemini_wrapper_ready=0
+gemini_use_pty=0
+gemini_force_requested=0
+if [[ "$tool" == "gemini" ]]; then
+  case "${GEMINI_FORCE_TTY,,}" in
+    1|true|yes)
+      gemini_use_pty=1
+      gemini_force_requested=1
+      ;;
+    0|false|no)
+      gemini_use_pty=0
+      ;;
+    auto|"")
+      [[ ! -t 1 ]] && gemini_use_pty=1
+      ;;
+    *)
+      warn "unknown AGENT_PERSONA_GEMINI_FORCE_TTY value: $GEMINI_FORCE_TTY (expected: auto|1|0)"
+      ;;
+  esac
+
+  if [[ $gemini_use_pty -eq 1 ]]; then
+    if command -v script >/dev/null 2>&1; then
+      if ! script -q -c /bin/true /dev/null >/dev/null 2>&1; then
+        if [[ $gemini_force_requested -eq 1 ]]; then
+          die "gemini: requested pseudo-TTY but 'script' cannot allocate a PTY; run in a real TTY or set AGENT_PERSONA_GEMINI_FORCE_TTY=0"
+        fi
+        warn "gemini: unable to allocate a PTY with 'script'; running without PTY (gemini may hang)"
+        gemini_use_pty=0
+      else
+        gemini_wrapper_file="$(mktemp -p "$STATE_DIR" "agent-persona.gemini-run.XXXXXX")"
+        {
+          echo "#!/usr/bin/env bash"
+          echo "set -euo pipefail"
+          printf "exec %q" "$tool_cmd"
+          for arg in "${tool_args[@]}"; do
+            printf " %q" "$arg"
+          done
+          echo ""
+        } > "$gemini_wrapper_file"
+        chmod +x "$gemini_wrapper_file"
+        gemini_wrapper_ready=1
+        log "gemini: wrapping with script for pseudo-TTY"
+      fi
+    else
+      if [[ $gemini_force_requested -eq 1 ]]; then
+        die "gemini: requested pseudo-TTY but 'script' is unavailable; install util-linux or set AGENT_PERSONA_GEMINI_FORCE_TTY=0"
+      fi
+      warn "gemini: stdout is not a TTY and 'script' is unavailable; gemini may hang (install util-linux)"
+      gemini_use_pty=0
+    fi
+  fi
+fi
 
 quote_join() {
   local out="" q
@@ -2077,7 +3114,15 @@ if [[ "$FORCE_SWAP" != "1" ]] && command -v unshare >/dev/null 2>&1; then
     cd \"\$root_dir\"
 
     if command -v $(printf '%q' "$tool_cmd") >/dev/null 2>&1; then
-      $(printf '%q' "$tool_cmd") $args_quoted
+      if [[ $gemini_use_pty -eq 1 && $gemini_wrapper_ready -eq 1 ]]; then
+        if command -v script >/dev/null 2>&1; then
+          script -q -c $(printf '%q' "$gemini_wrapper_file") /dev/null
+        else
+          $(printf '%q' "$gemini_wrapper_file")
+        fi
+      else
+        $(printf '%q' "$tool_cmd") $args_quoted
+      fi
     else
       echo 'tool not found: $tool_cmd' >&2
       exit 127
@@ -2128,7 +3173,15 @@ if [[ $launch_ok -eq 0 ]]; then
 
   cd "$root"
   if command -v "$tool_cmd" >/dev/null 2>&1; then
-    "$tool_cmd" "${tool_args[@]}"
+    if [[ $gemini_use_pty -eq 1 && $gemini_wrapper_ready -eq 1 ]]; then
+      if command -v script >/dev/null 2>&1; then
+        script -q -c "$gemini_wrapper_file" /dev/null
+      else
+        "$gemini_wrapper_file"
+      fi
+    else
+      "$tool_cmd" "${tool_args[@]}"
+    fi
     launch_ok=1
   else
     die "tool not found: $tool_cmd"

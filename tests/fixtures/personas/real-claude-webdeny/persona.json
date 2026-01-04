@@ -1,0 +1,9 @@
+{
+  "policy": {
+    "tools": {
+      "allow": ["read"],
+      "deny": ["websearch", "webfetch"]
+    }
+  }
+}
+

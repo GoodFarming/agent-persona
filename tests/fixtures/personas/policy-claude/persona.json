@@ -1,0 +1,12 @@
+{
+  "policy": {
+    "tools": {
+      "allow": ["bash", "read"],
+      "deny": ["websearch"]
+    },
+    "paths": {
+      "deny": ["./secrets"]
+    }
+  }
+}
+

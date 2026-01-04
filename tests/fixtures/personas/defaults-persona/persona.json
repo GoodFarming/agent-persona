@@ -1,0 +1,7 @@
+{
+  "defaults": {
+    "codex": ["-c", "model=from_persona", "-c", "features.web_search_request=false"],
+    "claude": ["--permission-mode", "bypassPermissions", "--verbose"]
+  }
+}
+

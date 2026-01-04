@@ -1,0 +1,7 @@
+{
+  "policy": {
+    "tools": { "allow": ["bash"] },
+    "network": { "deny": ["*"] }
+  }
+}
+

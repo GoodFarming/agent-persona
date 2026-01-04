@@ -17,6 +17,9 @@ Thumbs.db
 # Test artifacts
 tests/tmp/
 
+# Local planning scratch (repo keeps curated plans under docs/plans/)
+PLAN-*.md
+
 # Optional: keep private personas in this repo without committing them.
 # (Shipped personas are committed; anything else under .personas/ stays ignored by default.)
 .personas/*
@@ -24,4 +27,5 @@ tests/tmp/
 !.personas/blank/**
 !.personas/template/
 !.personas/template/**
-!.personas/meta.AGENTS.md
+!.personas/.shared/
+!.personas/.shared/**

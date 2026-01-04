@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "testserver": {
+      "command": "test-mcp",
+      "args": ["--foo", "bar"],
+      "env": { "TEST_ENV": "1" }
+    }
+  }
+}
+

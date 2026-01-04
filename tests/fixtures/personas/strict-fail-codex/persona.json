@@ -1,0 +1,6 @@
+{
+  "policy": {
+    "paths": { "deny": ["./secrets"] }
+  }
+}
+

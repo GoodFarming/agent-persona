@@ -1,0 +1,10 @@
+{
+  "include": [
+    { "file": "policy-base.json" }
+  ],
+  "policy": {
+    "tools": {
+      "allow": ["websearch"]
+    }
+  }
+}

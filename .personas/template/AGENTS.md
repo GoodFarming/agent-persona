@@ -2,6 +2,13 @@
 
 A demonstration persona showing the recommended structure for agent instruction files.
 
+## Shared Building Blocks
+
+<!-- include {"file":"agent-contract-posture.md"} -->
+<!-- include {"file":"communication-discipline.md"} -->
+<!-- include {"file":"knowledge-dilligence.md"} -->
+<!-- include {"file":"continuity.md"} -->
+
 ## Purpose
 <!-- What is this agent's primary mission? Keep it to 1-2 sentences. -->
 Demonstrate best practices for writing agent personas.

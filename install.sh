@@ -36,7 +36,7 @@ fetch() {
 }
 
 # Create directories
-mkdir -p "$BIN_DIR" "$SHARE_DIR/.personas"
+mkdir -p "$BIN_DIR" "$SHARE_DIR/.personas" "$SHARE_DIR/.personas/.shared"
 
 # Install launcher
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/agent-persona" ]]; then
@@ -78,12 +78,48 @@ install_persona() {
   info "Installed persona: $name"
 }
 
+# Install shared blocks used by shipped personas
+install_shared_file() {
+  local rel="$1"     # path relative to .personas/.shared/
+  local src="$2"     # local base dir or empty for remote
+  local dest="$SHARE_DIR/.personas/.shared/$rel"
+
+  if [[ -f "$dest" ]]; then
+    info "Shared file exists, skipping: .shared/$rel"
+    return
+  fi
+
+  mkdir -p "$(dirname "$dest")"
+
+  if [[ -n "$src" && -f "$src/$rel" ]]; then
+    cp "$src/$rel" "$dest"
+  else
+    fetch "$REPO_URL/.personas/.shared/$rel" "$dest"
+  fi
+
+  info "Installed shared file: .shared/$rel"
+}
+
 if [[ -n "$SCRIPT_DIR" && -d "$SCRIPT_DIR/.personas" ]]; then
+  SHARED_SRC=""
+  [[ -d "$SCRIPT_DIR/.personas/.shared" ]] && SHARED_SRC="$SCRIPT_DIR/.personas/.shared"
+  install_shared_file "agent-contract-posture.md" "$SHARED_SRC"
+  install_shared_file "communication-discipline.md" "$SHARED_SRC"
+  install_shared_file "knowledge-dilligence.md" "$SHARED_SRC"
+  install_shared_file "continuity.md" "$SHARED_SRC"
+  install_shared_file "meta.AGENTS.md" "$SHARED_SRC"
+
   for persona in "$SCRIPT_DIR/.personas"/*; do
     [[ -d "$persona" ]] || continue
     install_persona "$(basename "$persona")" "$persona"
   done
 else
+  install_shared_file "agent-contract-posture.md" ""
+  install_shared_file "communication-discipline.md" ""
+  install_shared_file "knowledge-dilligence.md" ""
+  install_shared_file "continuity.md" ""
+  install_shared_file "meta.AGENTS.md" ""
+
   install_persona "blank" ""
   install_persona "template" ""
 fi

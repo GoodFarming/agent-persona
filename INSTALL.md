@@ -4,6 +4,7 @@
 
 - **Linux** (required for best experience)
 - Bash 4.0+
+- Python 3 (required for `persona.json` policy translation/includes; optional otherwise)
 - One or more supported AI tools: `codex`, `claude`, `gemini`, `opencode`
 
 ### Optional but Recommended
@@ -60,6 +61,12 @@ agent-persona --list
 
 # Test with blank persona
 agent-persona claude blank
+
+# Inspect policy translation (if persona has policy)
+agent-persona print-policy codex my-persona
+
+# Launch without persona/tool defaults (optional)
+agent-persona codex my-persona --no-defaults
 ```
 
 ## Uninstall
@@ -143,6 +150,22 @@ Create `persona.json` next to `AGENTS.md`:
     "*": []
   }
 }
+```
+
+### Policy + strict enforcement (v1.1)
+
+Add a `policy` block to `persona.json` to define baseline tools/paths/network restrictions (user tool flags override by default). To enforce policy and fail fast when it can't be reliably enforced, use:
+
+```bash
+agent-persona codex my-persona --strict-policy
+# or:
+AGENT_PERSONA_STRICT_POLICY=1 agent-persona codex my-persona
+```
+
+To preview how your policy will be applied:
+
+```bash
+agent-persona print-policy codex my-persona
 ```
 
 ## Troubleshooting

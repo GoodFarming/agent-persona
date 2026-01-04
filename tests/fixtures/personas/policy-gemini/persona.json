@@ -1,0 +1,6 @@
+{
+  "policy": {
+    "tools": { "allow": ["read"] }
+  }
+}
+

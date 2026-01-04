@@ -1,0 +1,15 @@
+{
+  "policy": {
+    "tools": {
+      "allow": ["bash", "Read", "MyTool"],
+      "deny": ["websearch", "WeBfetch", 123]
+    },
+    "paths": {
+      "allow": ["./src"]
+    },
+    "network": {
+      "deny": ["*"]
+    }
+  }
+}
+

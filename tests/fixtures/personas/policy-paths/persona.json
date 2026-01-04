@@ -1,0 +1,8 @@
+{
+  "policy": {
+    "paths": {
+      "allow": ["./src", "~/allowed-home", "/tmp"]
+    }
+  }
+}
+

@@ -1,0 +1,14 @@
+{
+  "policy": {
+    "paths": {
+      "allow": ["./"]
+    },
+    "network": {
+      "deny": ["*"]
+    },
+    "tools": {
+      "deny": ["websearch", "webfetch"]
+    }
+  }
+}
+
