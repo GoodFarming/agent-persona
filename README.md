@@ -270,6 +270,28 @@ Include them in any persona:
 ...
 ```
 
+### Template Variables
+
+Use `{{persona}}` in shared blocks or meta files to reference the current persona name:
+
+```markdown
+# .personas/.shared/planning-rules.md
+
+## Planning
+Save your plans to `.persona/{{persona}}/PLAN.md`.
+Update `.persona/{{persona}}/SPEC.md` with requirements.
+```
+
+When expanded for persona `dev-agent`, this becomes:
+
+```markdown
+## Planning
+Save your plans to `.persona/dev-agent/PLAN.md`.
+Update `.persona/dev-agent/SPEC.md` with requirements.
+```
+
+Unrecognized `{{...}}` patterns emit a warning but don't block execution.
+
 ### Inheriting from Other Personas
 
 ```markdown
