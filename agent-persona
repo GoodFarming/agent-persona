@@ -1037,6 +1037,9 @@ def err(msg):
     print(f"include error: {msg}", file=sys.stderr)
     sys.exit(1)
 
+def warn(msg):
+    print(f"include warning: {msg}", file=sys.stderr)
+
 pattern = re.compile(r"<!--\s*include\s+(\{.*?\})\s*-->")
 
 root = os.path.abspath(os.environ.get("AP_ROOT") or os.getcwd())
@@ -1113,7 +1116,8 @@ def expand_line(line, base_root, depth, stack, path, line_no):
     if "<!--" not in line:
         return line
     if "<!-- include" in line and not pattern.search(line):
-        err(f"{path}:{line_no}: include directive must be JSON on a single line")
+        warn(f"{path}:{line_no}: include directive must be JSON on a single line (ignoring)")
+        return line
     out = []
     last = 0
     for match in pattern.finditer(line):
