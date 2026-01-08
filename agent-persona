@@ -103,6 +103,99 @@ meta_is_unedited_template() {
   [[ "$file_content" == "$template_content" ]]
 }
 
+default_readme_template() {
+  cat <<'README'
+# Repo-local personas (`.personas/`)
+
+This repository is set up for repo-local agent personas via `agent-persona`.
+
+## Repo-wide instructions (meta)
+
+- `.personas/.shared/meta.AGENTS.md` is merged into every persona launched in this repo.
+- The default template created by `agent-persona init` is ignored until you edit it.
+- Disable meta merge: `agent-persona ... --no-meta` or `AGENT_PERSONA_META=0`
+- Merge position: `--meta-position top|bottom` (default: top)
+
+## Shared blocks
+
+- Reusable instruction blocks live under `.personas/.shared/`.
+- Include them from any AGENTS/CLAUDE/GEMINI file:
+
+```md
+<!-- include {"file":"communication-discipline.md"} -->
+```
+
+## Template variables
+
+- Use `{{persona}}` in shared blocks or meta files to reference the current persona name.
+- Example: `.persona/{{persona}}/PLAN.md` expands to `.persona/my-agent/PLAN.md`
+
+## Add a persona
+
+Create a folder and an `AGENTS.md`:
+
+```bash
+mkdir -p .personas/my-persona
+$EDITOR .personas/my-persona/AGENTS.md
+```
+
+Optional `persona.json` (defaults + MCP):
+
+```json
+{
+  "defaults": {
+    "codex": ["--full-auto"],
+    "claude": ["--permission-mode", "bypassPermissions"]
+  },
+  "mcpServers": {
+    "myserver": {
+      "command": "my-mcp-server",
+      "args": ["--flag"],
+      "env": { "MY_ENV": "value" }
+    }
+  }
+}
+```
+
+## Launch
+
+```bash
+agent-persona codex my-persona
+agent-persona claude my-persona
+agent-persona gemini my-persona
+```
+
+## Notes
+
+- On Linux, `agent-persona` prefers a bind-mount overlay via `unshare` (no on-disk changes).
+- If `unshare` isn't available, it falls back to swap-and-restore. If you hard-kill the tool, run `agent-persona recover`.
+README
+}
+
+# Ensure README.md exists in the repo's persona directory
+ensure_persona_dir_readme() {
+  local persona_dir="$1"
+  local parent_dir readme_path
+  parent_dir="$(dirname "$persona_dir")"
+  local parent_name
+  parent_name="$(basename "$parent_dir")"
+
+  # Only inject README for repo .persona/.personas directories (not user/system)
+  if [[ "$parent_name" == ".persona" || "$parent_name" == ".personas" ]]; then
+    # Skip if this is under $HOME/.local, $HOME/.personas, or system paths
+    case "$parent_dir" in
+      "$HOME/.local"*|"$HOME/.personas"*|"/usr/local/share"*|"/usr/share"*)
+        return 0
+        ;;
+    esac
+    readme_path="$parent_dir/README.md"
+    if [[ ! -f "$readme_path" ]]; then
+      default_readme_template > "$readme_path"
+      log "created $readme_path"
+    fi
+  fi
+}
+
 # --- MCP temp config (Claude) ---
 mcp_config_file=""
 cleanup_mcp() { [[ -n "${mcp_config_file:-}" && -f "$mcp_config_file" ]] && rm -f "$mcp_config_file" 2>/dev/null || true; }
@@ -1754,73 +1847,7 @@ cmd_init() {
   fi
 
   if [[ ! -f "$personas_dir/README.md" ]]; then
-    cat > "$personas_dir/README.md" <<'README'
-# Repo-local personas (`.personas/`)
-
-This repository is set up for repo-local agent personas via `agent-persona`.
-
-## Repo-wide instructions (meta)
-
-- `.personas/.shared/meta.AGENTS.md` is merged into every persona launched in this repo.
-- The default template created by `agent-persona init` is ignored until you edit it.
-- Disable meta merge: `agent-persona ... --no-meta` or `AGENT_PERSONA_META=0`
-- Merge position: `--meta-position top|bottom` (default: top)
-
-## Shared blocks
-
-- Reusable instruction blocks live under `.personas/.shared/`.
-- Include them from any AGENTS/CLAUDE/GEMINI file:
-
-```md
-<!-- include {"file":"communication-discipline.md"} -->
-```
-
-- Example blocks created by `agent-persona init`:
-  - `.personas/.shared/agent-contract-posture.md`
-  - `.personas/.shared/communication-discipline.md`
-  - `.personas/.shared/knowledge-dilligence.md`
-  - `.personas/.shared/continuity.md`
-
-## Add a persona
-
-Create a folder and an `AGENTS.md`:
-
-```bash
-mkdir -p .personas/my-persona
-$EDITOR .personas/my-persona/AGENTS.md
-```
-
-Optional `persona.json` (defaults + MCP):
-
-```json
-{
-  "defaults": {
-    "codex": ["--full-auto"],
-    "claude": ["--permission-mode", "bypassPermissions"]
-  },
-  "mcpServers": {
-    "myserver": {
-      "command": "my-mcp-server",
-      "args": ["--flag"],
-      "env": { "MY_ENV": "value" }
-    }
-  }
-}
-```
-
-## Launch
-
-```bash
-agent-persona codex my-persona
-agent-persona claude my-persona
-agent-persona gemini my-persona
-```
-
-## Notes
-
-- On Linux, `agent-persona` prefers a bind-mount overlay via `unshare` (no on-disk changes).
-- If `unshare` isn’t available, it falls back to swap-and-restore. If you hard-kill the tool, run `agent-persona recover`.
-README
+    default_readme_template > "$personas_dir/README.md"
     info "  - README.md (how .personas/ works)"
 	  else
 	    info "  - README.md already exists"
@@ -2328,6 +2355,9 @@ cmd_print_overlay() {
 
   [[ -n "$persona_dir" ]] || die "persona '$persona' not found"
 
+  # Ensure README.md exists in repo persona directory
+  ensure_persona_dir_readme "$persona_dir"
+
   # Resolve instruction file (tool-specific or fallback to AGENTS.md)
   local persona_src
   persona_src="$(resolve_instruction_file "$persona_dir" "$overlay_name")"
@@ -2726,6 +2756,9 @@ log "persona source: $persona_src"
 
 # --- Normalize persona directory (handles file-vs-dir profiles) ---
 persona_dir="$(get_persona_dir "$persona_src" "$profile_type")"
+
+# --- Ensure README.md exists in repo persona directory ---
+ensure_persona_dir_readme "$persona_dir"
 
 # --- Determine overlay filename (moved earlier for per-tool instruction support) ---
 overlay_name="AGENTS.md"
