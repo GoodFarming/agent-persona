@@ -1006,10 +1006,11 @@ resolve_instruction_file() {
 }
 
 expand_includes() {
-  local src="$1" overlay_name="$2" shared_root="$3" include_root="$4" prefer_repo="$5" extra_paths="$6" persona_home="$7"
+  local src="$1" overlay_name="$2" shared_root="$3" include_root="$4" prefer_repo="$5" extra_paths="$6" persona_home="$7" persona_name="$8"
   [[ -f "$src" ]] || die "include source not found: $src"
 
-  if ! grep -q '<!--[[:space:]]*include' "$src" 2>/dev/null; then
+  # Skip Python if no include directives AND no {{...}} template variables
+  if ! grep -q '<!--[[:space:]]*include' "$src" 2>/dev/null && ! grep -q '{{' "$src" 2>/dev/null; then
     echo "$src"
     return 0
   fi
@@ -1023,6 +1024,7 @@ expand_includes() {
   set +e
   AP_ROOT="$include_root" AP_PREFER_REPO="$prefer_repo" AP_EXTRA_PATHS="$extra_paths" \
     AP_PERSONA_HOME="$persona_home" AP_HOME="$HOME" AP_INCLUDE_DEPTH="$INCLUDE_DEPTH" \
+    AP_PERSONA_NAME="$persona_name" \
     "$py" - "$src" "$overlay_name" "$shared_root" <<'PY' > "$tmp"
 import json
 import os
@@ -1172,6 +1174,17 @@ def expand_file(path, base_root, depth, stack):
     return "".join(out_lines)
 
 output = expand_file(src_path, shared_root, 1, [])
+
+# Substitute {{persona}} variable
+persona_name = os.environ.get("AP_PERSONA_NAME", "")
+if persona_name:
+    output = output.replace("{{persona}}", persona_name)
+
+# Warn about any unrecognized {{...}} variables (but don't block)
+unrecognized = re.findall(r'\{\{([^}]+)\}\}', output)
+for var in unrecognized:
+    warn(f"unrecognized template variable: {{{{{var}}}}}")
+
 sys.stdout.write(output)
 PY
   local rc=$?
@@ -2328,7 +2341,7 @@ cmd_print_overlay() {
   persona_shared_root="$(dirname "$persona_dir")/.shared"
   local persona_src_expanded
   persona_src_expanded="$(expand_includes "$persona_src" "$overlay_name" "$persona_shared_root" \
-    "$include_root" "$include_prefer_repo" "$include_extra_paths" "$include_persona_home")"
+    "$include_root" "$include_prefer_repo" "$include_extra_paths" "$include_persona_home" "$persona")"
 
   # Find and merge meta
   local repo_root meta_path=""
@@ -2376,7 +2389,7 @@ cmd_print_overlay() {
   local meta_src_expanded=""
   if [[ -n "$meta_path" ]]; then
     meta_src_expanded="$(expand_includes "$meta_path" "$overlay_name" "$repo_shared_root" \
-      "$include_root" "$include_prefer_repo" "$include_extra_paths" "$include_persona_home")"
+      "$include_root" "$include_prefer_repo" "$include_extra_paths" "$include_persona_home" "$persona")"
   fi
 
   if [[ -n "$meta_path" && "$META_POSITION" == "top" ]]; then
@@ -2911,7 +2924,7 @@ fi
 # --- Expand include directives in persona instructions ---
 persona_shared_root="$(dirname "$persona_dir")/.shared"
 link_target="$(expand_includes "$link_target" "$overlay_name" "$persona_shared_root" \
-  "$root" "$PREFER_REPO" "$EXTRA_PATHS" "$PERSONA_HOME")"
+  "$root" "$PREFER_REPO" "$EXTRA_PATHS" "$PERSONA_HOME" "$persona")"
 
 # --- Merge repo meta if present ---
 meta_files=()
@@ -2952,7 +2965,7 @@ if (( ${#meta_files[@]} > 0 )); then
   meta_files_expanded=()
   for p in "${meta_files[@]}"; do
     meta_files_expanded+=( "$(expand_includes "$p" "$overlay_name" "$repo_shared_root" \
-      "$root" "$PREFER_REPO" "$EXTRA_PATHS" "$PERSONA_HOME")" )
+      "$root" "$PREFER_REPO" "$EXTRA_PATHS" "$PERSONA_HOME" "$persona")" )
   done
 
   meta_tmp="$(mktemp -p "${TMPDIR:-/tmp}" "agent-persona.${overlay_name}.XXXXXX")"
