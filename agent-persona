@@ -32,6 +32,9 @@ warn() { echo "[agent-persona] warning: $*" >&2; }
 info() { echo "[agent-persona] $*" >&2; }
 
 # --- Configuration (env vars with CLI flag overrides) ---
+UPDATE_CHECK="${AGENT_PERSONA_UPDATE_CHECK:-1}"
+UPDATE_CHECK_INTERVAL="${AGENT_PERSONA_UPDATE_CHECK_INTERVAL:-86400}"  # 24 hours
+
 META_ENABLED="${AGENT_PERSONA_META:-1}"
 META_FILE_OVERRIDE="${AGENT_PERSONA_META_FILE:-}"
 META_POSITION="${AGENT_PERSONA_META_POSITION:-top}"
@@ -194,6 +197,60 @@ ensure_persona_dir_readme() {
       log "created $readme_path"
     fi
   fi
+}
+
+# --- Update checking ---
+version_gt() {
+  # Returns 0 if $1 > $2 (semver comparison)
+  [[ "$1" == "$2" ]] && return 1
+  local IFS=.
+  local i v1=($1) v2=($2)
+  for ((i=0; i<${#v1[@]} || i<${#v2[@]}; i++)); do
+    local n1="${v1[i]:-0}" n2="${v2[i]:-0}"
+    ((n1 > n2)) && return 0
+    ((n1 < n2)) && return 1
+  done
+  return 1
+}
+
+check_for_updates() {
+  [[ "$UPDATE_CHECK" == "0" ]] && return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/agent-persona"
+  local cache_file="$cache_dir/latest-version"
+  local now cached_time cached_version
+  now="$(date +%s)"
+
+  # Check cache first
+  if [[ -f "$cache_file" ]]; then
+    read -r cached_time cached_version < "$cache_file" 2>/dev/null || true
+    if [[ -n "$cached_time" && -n "$cached_version" ]]; then
+      if (( now - cached_time < UPDATE_CHECK_INTERVAL )); then
+        # Cache is fresh - compare versions
+        if version_gt "$cached_version" "$VERSION"; then
+          echo "[agent-persona] Update available: $cached_version (current: $VERSION). Run: git -C \"${AGENT_PERSONA_HOME:-$HOME/.local/share/agent-persona}\" pull" >&2
+        fi
+        return 0
+      fi
+    fi
+  fi
+
+  # Fetch latest version in background (don't block startup)
+  (
+    local latest_version
+    latest_version="$(curl -sf --max-time 3 \
+      "https://raw.githubusercontent.com/GoodFarming/agent-persona/main/agent-persona" 2>/dev/null \
+      | grep -m1 '^VERSION=' | sed 's/VERSION="\([^"]*\)"/\1/')" || true
+
+    if [[ -n "$latest_version" ]]; then
+      mkdir -p "$cache_dir" 2>/dev/null
+      echo "$now $latest_version" > "$cache_file" 2>/dev/null
+      if version_gt "$latest_version" "$VERSION"; then
+        echo "[agent-persona] Update available: $latest_version (current: $VERSION). Run: git -C \"${AGENT_PERSONA_HOME:-$HOME/.local/share/agent-persona}\" pull" >&2
+      fi
+    fi
+  ) &
 }
 
 # --- MCP temp config (Claude) ---
@@ -2542,6 +2599,8 @@ ENVIRONMENT:
   AGENT_PERSONA_INCLUDE_DEPTH=10    Max include recursion depth
   AGENT_PERSONA_PATHS=<p1:p2:...>   Extra search paths
   AGENT_PERSONA_HOME=<path>         Persona home (contains .personas/)
+  AGENT_PERSONA_UPDATE_CHECK=0      Disable update checking
+  AGENT_PERSONA_UPDATE_CHECK_INTERVAL=86400  Check interval in seconds (default: 24h)
 
 EXPORTED TO TOOL (v1.1+):
   AGENT_PERSONA_NAME          Persona slug (e.g., "code-reviewer")
@@ -2684,6 +2743,9 @@ done
 # Validate
 [[ -n "$persona" ]] || { usage; exit 2; }
 [[ -n "$tool" ]] || die "tool required. Use: agent-persona <tool> <persona>"
+
+# Check for updates (non-blocking background check)
+check_for_updates
 
 # --- Resolve working root ---
 root="${AGENT_PERSONA_ROOT:-$(pwd)}"

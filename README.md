@@ -491,6 +491,8 @@ opencode-persona my-agent
 | `AGENT_PERSONA_HOME` | User persona directory | `~/.local/share/agent-persona` |
 | `AGENT_PERSONA_PREFER_REPO` | Prefer repo-local personas | `1` |
 | `AGENT_PERSONA_INCLUDE_DEPTH` | Max include recursion depth | `10` |
+| `AGENT_PERSONA_UPDATE_CHECK` | Enable update checking | `1` |
+| `AGENT_PERSONA_UPDATE_CHECK_INTERVAL` | Update check interval (seconds) | `86400` (24h) |
 | `AGENT_PERSONA_GEMINI_DISABLE_IDE` | Disable Gemini IDE mode | `0` |
 | `AGENT_PERSONA_GEMINI_FORCE_TTY` | Force pseudo-TTY for Gemini | `auto` |
 
